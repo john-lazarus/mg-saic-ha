@@ -41,6 +41,7 @@ from .const import (
     UPDATE_INTERVAL_GRACE_PERIOD,
     UPDATE_INTERVAL_POWERED,
 )
+from .logic import build_vehicle_options
 from saic_ismart_client_ng import SaicApi
 from saic_ismart_client_ng.model import SaicApiConfiguration
 
@@ -249,19 +250,8 @@ class SAICMGConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             vehicles = await backend.get_vehicle_info()
             if not vehicles:
                 raise Exception("India vehicle list returned no vehicles")
-            self.vehicles = []
-            self.vehicle_labels = {}
-            for v in vehicles:
-                vin_value = getattr(v, "vin", v)
-                self.vehicles.append(vin_value)
-                # Human-friendly label (issue #229): prefer the model name,
-                # fall back to the series, and append a masked VIN suffix so
-                # two cars of the same model remain distinguishable.  A
-                # vehicle without metadata falls back to its plain VIN.
-                model = getattr(v, "modelName", None) or getattr(v, "series", None)
-                self.vehicle_labels[vin_value] = (
-                    f"{model} (…{vin_value[-4:]})" if model else vin_value
-                )
+            self.vehicle_labels = build_vehicle_options(vehicles)
+            self.vehicles = list(self.vehicle_labels)
             LOGGER.info("Fetched India vehicle data successfully.")
         finally:
             with suppress(Exception):
