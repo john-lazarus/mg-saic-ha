@@ -114,7 +114,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 # the original cause is preserved instead of being masked
                 # (issue #230).
                 raise ConfigEntryNotReady(
-                    f"Login to MG SAIC failed for account {acct_key}: {exc}"
+                    "Could not log in to MG SAIC; Home Assistant will retry "
+                    "automatically."
                 ) from exc
             domain["account_clients"][acct_key] = client
             LOGGER.debug("Login successful for account %s", acct_key)
