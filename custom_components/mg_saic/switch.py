@@ -7,6 +7,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 from .api import CommandsLimitReachedException, VehicleNotLockedException
 from .backends import Feature
+from .logic import charging_data_for_controls
 from .const import (
     DOMAIN,
     LOGGER,
@@ -227,8 +228,15 @@ class SAICMGBatteryHeatingSwitch(CoordinatorEntity, SwitchEntity):
 
     @property
     def is_on(self):
-        """Return true if battery heating is active."""
+        """Return true if battery heating is active.
+
+        Unknown (None) when the latest poll got no charging data: whether it
+        is heating is a live state, so the last answer isn't shown as
+        current. The switch stays usable (#419).
+        """
         charging_data = self.coordinator.data.get("charging")
+        if charging_data is None:
+            return None
         if charging_data:
             chrgMgmtData = getattr(charging_data, "chrgMgmtData", None)
             if chrgMgmtData:
@@ -241,7 +249,7 @@ class SAICMGBatteryHeatingSwitch(CoordinatorEntity, SwitchEntity):
         """Return True if the switch entity is available."""
         return (
             self.coordinator.last_update_success
-            and self.coordinator.data.get("charging") is not None
+            and charging_data_for_controls(self.coordinator) is not None
         )
 
     async def async_turn_on(self, **kwargs):
@@ -404,7 +412,7 @@ class SAICMGChargingPortLockSwitch(CoordinatorEntity, SwitchEntity):
     @property
     def is_on(self):
         """Return true if the charging port is locked."""
-        charging_data = self.coordinator.data.get("charging")
+        charging_data = charging_data_for_controls(self.coordinator)
         if charging_data:
             lock_status = getattr(
                 charging_data.chrgMgmtData, "ccuEleccLckCtrlDspCmd", None
@@ -469,8 +477,15 @@ class SAICMGChargingSwitch(CoordinatorEntity, SwitchEntity):
 
     @property
     def is_on(self):
-        """Return true if charging is active."""
+        """Return true if charging is active.
+
+        Unknown (None) when the latest poll got no charging data, rather than
+        the last answer: whether it is charging is a live state. The switch
+        stays usable (#419).
+        """
         charging_data = self.coordinator.data.get("charging")
+        if charging_data is None:
+            return None
         if charging_data:
             chrgMgmtData = getattr(charging_data, "chrgMgmtData", None)
             if chrgMgmtData:
@@ -483,7 +498,7 @@ class SAICMGChargingSwitch(CoordinatorEntity, SwitchEntity):
         """Return True if the switch entity is available."""
         return (
             self.coordinator.last_update_success
-            and self.coordinator.data.get("charging") is not None
+            and charging_data_for_controls(self.coordinator) is not None
         )
 
     async def async_turn_on(self, **kwargs):

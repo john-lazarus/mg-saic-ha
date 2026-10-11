@@ -8,6 +8,7 @@ from homeassistant.components.number import (
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.const import PERCENTAGE, UnitOfTemperature
 from .backends import Feature
+from .logic import charging_data_for_controls
 from .const import (
     DOMAIN,
     LOGGER,
@@ -79,7 +80,7 @@ class SAICMGTargetSOCNumber(CoordinatorEntity, NumberEntity):
     @property
     def native_value(self):
         """Return the current target SOC value."""
-        charging_data = self.coordinator.data.get("charging")
+        charging_data = charging_data_for_controls(self.coordinator)
         if charging_data:
             chrg_mgmt_data = getattr(charging_data, "chrgMgmtData", None)
             if chrg_mgmt_data:
@@ -130,7 +131,7 @@ class SAICMGTargetSOCNumber(CoordinatorEntity, NumberEntity):
         """Return True if the number entity is available."""
         return (
             self.coordinator.last_update_success
-            and self.coordinator.data.get("charging") is not None
+            and charging_data_for_controls(self.coordinator) is not None
         )
 
     async def async_set_native_value(self, value: float) -> None:

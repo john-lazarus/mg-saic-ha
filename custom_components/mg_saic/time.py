@@ -9,6 +9,7 @@ from homeassistant.util import dt as dt_util
 
 from .api import CommandsLimitReachedException, VehicleNotLockedException
 from .backends import Feature
+from .logic import charging_data_for_controls
 from .const import DOMAIN, LOGGER
 from .utils import create_device_info
 
@@ -243,7 +244,7 @@ class SAICMGScheduledChargingTime(CoordinatorEntity, TimeEntity):
         if pending is not None:
             return pending
 
-        charging_data = self.coordinator.data.get("charging")
+        charging_data = charging_data_for_controls(self.coordinator)
         chrg_mgmt_data = getattr(charging_data, "chrgMgmtData", None)
         decoded = decode_scheduled_charging_field(
             chrg_mgmt_data, self._hour_attr, self._minute_attr
@@ -257,7 +258,7 @@ class SAICMGScheduledChargingTime(CoordinatorEntity, TimeEntity):
         """Return True if the entity is available."""
         return (
             self.coordinator.last_update_success
-            and self.coordinator.data.get("charging") is not None
+            and charging_data_for_controls(self.coordinator) is not None
         )
 
     async def async_set_value(self, value: time) -> None:

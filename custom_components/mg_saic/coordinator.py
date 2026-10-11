@@ -232,6 +232,9 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # The stored copy (its statusTime) a quiet-hours live poll was last
         # spent on, so one copy never buys two polls.
         self._quiet_polled_for_epoch: int | None = None
+        # The last charging reply the car gave, for the charging controls
+        # while the car isn't answering that request (#419).
+        self.last_charging_data = None
         self._last_command_unreachable = False
         self._last_command_unreachable_time = None
         # Debounce for the code-4 'unreachable' signal: only flag after this many
@@ -2035,6 +2038,8 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         """Update state variables based on fetched data."""
         status_data = data.get("status")
         charging_data = data.get("charging")
+        if charging_data is not None:
+            self.last_charging_data = charging_data
         recent_activity = False
 
         # Vehicle status

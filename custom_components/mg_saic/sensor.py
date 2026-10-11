@@ -1934,7 +1934,7 @@ class SAICMGInstantPowerSensor(CoordinatorEntity, SensorEntity):
                     self._last_valid_power = 0
                     return 0
             else:
-                LOGGER.error("No charging data available for %s", self._name)
+                LOGGER.debug("No charging data available for %s", self._name)
 
         except Exception as e:
             LOGGER.error(
@@ -2191,7 +2191,7 @@ class SAICMGChargingCurrentSensor(CoordinatorEntity, SensorEntity):
                 else:
                     return None
             else:
-                LOGGER.error("No charging data available for %s", self._name)
+                LOGGER.debug("No charging data available for %s", self._name)
 
         except Exception as e:
             LOGGER.error(
@@ -2334,7 +2334,7 @@ class SAICMGChargingPowerSensor(CoordinatorEntity, SensorEntity):
                 else:
                     return None
             else:
-                LOGGER.error("No charging data available for %s", self._name)
+                LOGGER.debug("No charging data available for %s", self._name)
 
         except Exception as e:
             LOGGER.error("Error retrieving charging power sensor %s: %s", self._name, e)
@@ -2715,7 +2715,7 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
                     # raw_value is None — fall through to retention below
 
             else:
-                LOGGER.error("No charging data available for %s", self._name)
+                LOGGER.debug("No charging data available for %s", self._name)
 
         except Exception as e:
             LOGGER.error("Error retrieving charging sensor %s: %s", self._name, e)

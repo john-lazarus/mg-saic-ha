@@ -81,6 +81,13 @@ It's **always available**, and its attributes give the detail:
 Its companion, **Charging Data Last Updated**, is a timestamp of the same `last_success` moment, so a dashboard shows it natively as "12 minutes ago".
  
 Use it to gate charging automations — for example, only act on Charging Power or Charging Status when Charging Data Freshness is `live`, so an automation never fires on a held value from before an outage.
+
+**The charging controls during an outage** *(from 1.4.0-beta5)*: the car can stop answering the charging request for hours while everything else works — and the iSmart app's charging page fails the same way (#419: 21 hours on an MG4). The controls stay usable instead of going unavailable:
+
+- **Target SOC**, **Charging Current Limit**, **Scheduled Charging Mode**, **Start** and **End** show the last values the car gave. The car still accepts the commands, so you can still change them.
+- **Charging** and **Battery Heating** stay usable but read unknown, because whether the car is charging (or heating) right now isn't known.
+
+They only go unavailable if the car has never answered the charging request since Home Assistant started.
  
 > **Current isn't the same as right:** the state says whether the figures are *current*. If SAIC returns a successful response containing bad values, it reads `live`. The one known case — the car resetting its since-charge counters without a charge — is handled separately, and shows up in the `counter_reset_held` attributes above. See [Charging figures reset to 0 without a charge](troubleshooting.md#charging-figures-reset-to-0-without-a-charge).
  
