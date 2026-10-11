@@ -158,7 +158,7 @@ The Charging Duration readings can't be added up to the total: each one is how f
 
 Before 1.3.0-beta9 only the last stretch was counted: a 1 h 44 min charge at about 5 kW, with two half-minute pauses, showed as 26 minutes at 19.8 kW (#262).
 
-**Charges no poll saw.** *(From 1.4.0-beta3.)* A charge can start and finish between two polls: overnight with [Quiet hours](power-management.md#quiet-hours), or on a long polling interval. If the car was plugged in at the poll before, and the poll after finds the battery higher and the car's own record showing a charge that ended in between, the charge is still recorded:
+**Charges no poll saw.** *(From 1.4.0-beta3.)* A charge can start and finish between two polls: overnight with [Quiet charging](power-management.md#quiet-charging), or on a long polling interval. If the car was plugged in at the poll before, and the poll after finds the battery higher and the car's own record showing a charge that ended in between, the charge is still recorded:
 
 - `reconstructed: true` on **Last Charge Energy**, and `duration_source: not_seen`.
 - Energy and range added come from the battery % before and after, as for any charge.
@@ -374,7 +374,7 @@ If your model reads wrong too, the same fix needs the same evidence: a monitor o
 - Sunroof *(if equipped — currently non-functional on tested models; see note below)*
 - Charging Port Lock *(⚠️ "on" means locked — see Entity States Reference)*
 - Holiday Mode *(slows polling to reduce wake-ups / 12V drain while the car is left for long periods — see [Deep sleep & holiday mode](power-management.md#deep-sleep--holiday-mode))*
-- Quiet Hours Live Polling *(only with **Quiet hours** ticked in the options — off means scheduled polls read SAIC's stored status instead of waking the car; see [Quiet hours](power-management.md#quiet-hours))*
+- Quiet Charging *(only with **Quiet charging** ticked in the options — on means scheduled polls read SAIC's stored status instead of waking the car; see [Quiet charging](power-management.md#quiet-charging). Was **Quiet Hours Live Polling**, the other way round, before 1.4.0-beta5)*
 > **Sunroof note:** the sunroof switch and status are retained but are currently non-functional on tested models (e.g. MGS6 EV), where the SAIC API always reports the sunroof as closed regardless of its real position and no working control command has been identified. The option is off by default. It may be revisited if MG adds sunroof support to the iSmart app.
 ### BUTTONS
 - Trigger Alarm
@@ -397,7 +397,7 @@ If your model reads wrong too, the same fix needs the same evidence: a monitor o
 - Scheduled Charging Mode *(BEV/PHEV — Disabled / Until Target SOC / Until Scheduled Time. Selecting a mode sends one command applying the mode together with the Scheduled Charging Start/End times)*
 ### TIME
 - Scheduled Charging Start / Scheduled Charging End *(BEV/PHEV — the charging window, shown as in the iSmart app. Changing these does **not** send a command; the window is applied when you change the Scheduled Charging Mode select, so adjusting both times costs a single command)*
-- Quiet Hours Start / Quiet Hours End *(only with **Quiet hours** ticked in the options — when Quiet Hours Live Polling turns off and back on, in your Home Assistant timezone; see [Quiet hours](power-management.md#quiet-hours))*
+- Quiet Charging Start / Quiet Charging End *(only with **Quiet charging** ticked in the options — when Quiet Charging turns on and off, in your Home Assistant timezone; see [Quiet charging](power-management.md#quiet-charging))*
 - Battery Heating Schedule Time *(if equipped — the daily start time for scheduled battery heating, shown in your Home Assistant timezone. Changing it while the schedule is enabled pushes the new time to the vehicle immediately; otherwise it is held locally until the Battery Heating Schedule switch is turned on)*
 **Note: Actions (Services) can be accessed and activated from the Actions menu under Developer Tools.**
 ![image](https://github.com/user-attachments/assets/14be0d41-ae65-4738-8bc0-5b0f743c290f)

@@ -278,11 +278,12 @@ class SAICMGScheduledChargingTime(CoordinatorEntity, TimeEntity):
 
 
 class SAICMGQuietHoursTime(CoordinatorEntity, TimeEntity):
-    """Quiet Hours Start / Quiet Hours End (#269).
+    """Quiet Charging Start / Quiet Charging End (#269).
 
-    When Quiet Hours Live Polling turns off and back on. Local time, kept in
-    the integration's options so it survives a restart. Only present when
-    Quiet hours is ticked in the integration's options.
+    When Quiet Charging turns on and back off. Local time, kept in the
+    integration's options so it survives a restart. Only present when Quiet
+    charging is ticked in the integration's options. (Quiet Hours Start /
+    End in 1.4.0-beta1 to beta4.)
     """
 
     _attr_entity_category = EntityCategory.CONFIG
@@ -292,9 +293,9 @@ class SAICMGQuietHoursTime(CoordinatorEntity, TimeEntity):
         self._which = which
         label = "Start" if which == "start" else "End"
         self._attr_name = (
-            f"{vin_info.brandName} {vin_info.modelName} Quiet Hours {label}"
+            f"{vin_info.brandName} {vin_info.modelName} Quiet Charging {label}"
         )
-        self._attr_unique_id = f"{entry.entry_id}_{vin}_quiet_hours_{which}"
+        self._attr_unique_id = f"{entry.entry_id}_{vin}_quiet_charging_{which}"
         self._attr_icon = "mdi:weather-night" if which == "start" else "mdi:weather-sunny"
         self._device_info = create_device_info(coordinator, entry.entry_id)
 

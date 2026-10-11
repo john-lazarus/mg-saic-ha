@@ -102,21 +102,25 @@ They only go unavailable if the car has never answered the charging request sinc
 - The `Next Update Time` / `Last Update Time` sensors reflect the holiday cadence automatically, so you can confirm it's active.
 > Holiday mode reduces *Home Assistant's* share of the wake-ups. The car and the official iSmart app also poll it, so for very long storage a dedicated 12V maintenance charger is still the reliable safeguard against a flat battery.
  
-### Quiet hours
+### Quiet charging
 
 *From 1.4.0-beta1. New: please say how it behaves on your car in #269.*
 
-**Quiet hours** stop the integration waking the car overnight. Between a start and an end time you choose, while the car is switched off, each scheduled poll reads SAIC's stored copy of the car's status instead of asking the car. That read does not contact the car (see [Reading SAIC's stored status](troubleshooting.md#reading-saics-stored-status-read_cached_status)), so on an MGS6 it leaves the 12V battery alone, and on an MG HS PHEV charging overnight it should spare you the lights coming on at every poll (#269).
+> **Renamed in 1.4.0-beta5.** In beta1 to beta4 this was *Quiet hours*, with a **Quiet Hours Live Polling** switch where **on** meant normal polling. It is now **Quiet Charging**, and **on means quiet**. The old entities are removed when you update, so an automation that used them needs pointing at the new ones, with on and off swapped.
 
-**Turning it on:** tick **Quiet hours** under the integration's **Configure** menu. Three controls appear on the device, all starting with *Quiet Hours* so they sit together:
+**Quiet charging** stops the integration waking the car overnight. Between a start and an end time you choose, while the car is switched off, each scheduled poll reads SAIC's stored copy of the car's status instead of asking the car. That read does not contact the car (see [Reading SAIC's stored status](troubleshooting.md#reading-saics-stored-status-read_cached_status)), so on an MGS6 it leaves the 12V battery alone, and on an MG HS PHEV charging overnight it should spare you the lights coming on at every poll (#269).
+
+**Turning it on:** tick **Quiet charging** under the integration's **Configure** menu. Three controls appear on the device, all starting with *Quiet Charging* so they sit together:
 
 | Control | What it does |
 |---|---|
-| **Quiet Hours Start** | When Live Polling turns off (default 22:00) |
-| **Quiet Hours End** | When Live Polling turns back on (default 07:00) |
-| **Quiet Hours Live Polling** | On: polling as normal. Off: quiet. The two times flip it, and you or an automation can flip it in between |
+| **Quiet Charging** | On: quiet. Off: polling as normal. The two times flip it, and you or an automation can flip it in between |
+| **Quiet Charging Start** | When Quiet Charging turns on (default 22:00) |
+| **Quiet Charging End** | When Quiet Charging turns off again (default 07:00) |
 
-**While Live Polling is off and the car is switched off:**
+To stop using it altogether, untick **Quiet charging** in Configure: the three controls go and polling is normal all the time. The switch only overrides the times for now.
+
+**While Quiet Charging is on and the car is switched off:**
 
 - Scheduled polls read the stored status at your normal idle interval (or the Holiday Mode one), never faster, even while charging.
 - **When the stored status shows a charge may have started**, one live poll checks, so Home Assistant shows **Charging** overnight. The car updates the stored status by itself when a charge starts, so this needs no help from your charger. That is either:
@@ -125,29 +129,29 @@ They only go unavailable if the car has never answered the charging request sinc
 
   Each stored status buys one live poll at most: if the car turns out to be waiting for its slot, nothing more is asked until the stored status changes again.
 - **When the charge should have finished**, one live poll checks. The time comes from the car's own "time remaining" figure where it gives one, otherwise from the battery level, your target and the charging power, plus 15 minutes. If the car has not finished (a smart tariff pausing it, for example), nothing more is asked until the stored status shows charging has started again.
-- **At the end time**, Live Polling comes back on with one live poll to catch up.
+- **At the end time**, Quiet Charging turns off, with one live poll to catch up.
 
-**What you give up:** live battery % and charging power during the night. A charge seen by the live poll at its start is recorded as normal. From 1.4.0-beta3, one that starts and finishes without a live poll seeing it (a car plugged in during quiet hours after Home Assistant last saw it unplugged, for example) is still recorded at the end time, from the battery % before and after, but without a duration: see *Charges no poll saw* in [Trip & efficiency statistics](sensors.md#trip--efficiency-statistics).
+**What you give up:** live battery % and charging power during the night. A charge seen by the live poll at its start is recorded as normal. From 1.4.0-beta3, one that starts and finishes without a live poll seeing it (a car plugged in during the quiet time after Home Assistant last saw it unplugged, for example) is still recorded at the end time, from the battery % before and after, but without a duration: see *Charges no poll saw* in [Trip & efficiency statistics](sensors.md#trip--efficiency-statistics).
 
 **What still reaches the car:**
-- A car switched on during quiet hours is polled as normal.
+- A car switched on during the quiet time is polled as normal.
 - **Update Vehicle Data** and any command you send.
 - The checks after you switch the car off.
 
-If one of those finds the car charging, the "has it finished?" check is set up from it, just as for quiet hours' own poll *(from 1.4.0-beta4)*. So an automation that presses **Update Vehicle Data** when your charger starts charging gives you the charge-start poll straight away, and quiet hours takes it from there.
+If one of those finds the car charging, the "has it finished?" check is set up from it, just as for quiet charging's own poll *(from 1.4.0-beta4)*. So an automation that presses **Update Vehicle Data** when your charger starts charging gives you the charge-start poll straight away, and quiet charging takes it from there.
 
 **Worth knowing:**
 - The stored status updates itself at the start of a charge on an MGS6 and an MG HS PHEV. Other models are still to be confirmed; a model that doesn't simply won't show a charge until the end time.
-- The live poll at the start of a charge is the one an HS PHEV owner may see as the lights coming on. The car also turns them on by itself when a charge starts or resumes, and quiet hours can't stop that.
-- **Live Polling survives a Home Assistant restart** as you left it. If a start or end time passed while Home Assistant was down, that time's setting applies instead, so a restart can't leave it the wrong way round. With the default 22:00 to 07:00:
+- The live poll at the start of a charge is the one an HS PHEV owner may see as the lights coming on. The car also turns them on by itself when a charge starts or resumes, and quiet charging can't stop that.
+- **Quiet Charging survives a Home Assistant restart** as you left it. If a start or end time passed while Home Assistant was down, that time's setting applies instead, so a restart can't leave it the wrong way round. With the default 22:00 to 07:00:
 
   | What happened | After the restart |
   |---|---|
-  | Switched on by hand at 23:30, Home Assistant restarted at 01:00 | **On**, as you left it |
-  | Off from 22:00, Home Assistant restarted at 03:00 | **Off** |
-  | Off from 22:00, Home Assistant down until 08:00 (the 07:00 end was missed) | **On** |
-  | On by hand at 23:30, Home Assistant down until 22:30 the next night (the 22:00 start was missed) | **Off** |
-- The Live Polling switch shows the start and end times, when the "has it finished?" check is due, and the last stored-status read, in its attributes.
+  | Turned off by hand at 23:30, Home Assistant restarted at 01:00 | **Off**, as you left it |
+  | On from 22:00, Home Assistant restarted at 03:00 | **On** |
+  | On from 22:00, Home Assistant down until 08:00 (the 07:00 end was missed) | **Off** |
+  | Turned off by hand at 23:30, Home Assistant down until 22:30 the next night (the 22:00 start was missed) | **On** |
+- The Quiet Charging switch shows the start and end times, when the "has it finished?" check is due, and the last stored-status read, in its attributes.
 
 ### Catching the start of a charge
 
@@ -164,5 +168,5 @@ The figures the integration works out for a charge don't depend on catching its 
 Under the integration's **Configure** menu:
  
 - **Holiday mode idle interval (hours)** — how slowly to poll while holiday mode is on (default 12)
-- **Quiet hours** — adds the Quiet Hours controls described above (default off)
+- **Quiet charging** — adds the Quiet Charging controls described above (default off)
 - **Data staleness threshold (hours)** — how long without reported activity before the Reachability sensor reads `likely_asleep` (default 12)

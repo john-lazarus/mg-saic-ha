@@ -214,7 +214,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         )
         # Quiet hours (#269): between two times the owner sets, scheduled polls
         # read SAIC's stored status instead of waking the car. See
-        # quiet_hours.py. live_polling is the Quiet Hours Live Polling switch:
+        # quiet_hours.py. live_polling is the opposite of the Quiet Charging switch:
         # the two times flip it, and the owner (or an automation) can too.
         self.quiet_hours = bool(config_entry.options.get(CONF_QUIET_HOURS, False))
         self.quiet_hours_start = parse_hhmm(
@@ -1035,6 +1035,33 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             setattr(self, attr, value)
         self._saved_activity_times = self._activity_times_snapshot()
 
+    # Quiet charging's controls as they were in 1.4.0-beta1 to beta4, by
+    # platform and unique-id suffix. Renamed (and the switch's on/off swapped),
+    # so the old entities would otherwise linger as "unavailable".
+    _RENAMED_QUIET_ENTITIES = (
+        ("switch", "quiet_hours_live_polling"),
+        ("time", "quiet_hours_start"),
+        ("time", "quiet_hours_end"),
+    )
+
+    def _remove_renamed_quiet_entities(self) -> None:
+        """Drop the beta1-beta4 quiet hours entities from the registry."""
+        try:
+            from homeassistant.helpers import entity_registry as er
+
+            registry = er.async_get(self.hass)
+            for platform, suffix in self._RENAMED_QUIET_ENTITIES:
+                unique_id = f"{self.config_entry.entry_id}_{self.vin}_{suffix}"
+                entity_id = registry.async_get_entity_id(platform, DOMAIN, unique_id)
+                if entity_id:
+                    registry.async_remove(entity_id)
+                    LOGGER.info(
+                        "Removed %s: renamed in 1.4.0-beta5 (Quiet Charging)",
+                        entity_id,
+                    )
+        except Exception as err:  # noqa: BLE001 - best effort only
+            LOGGER.debug("Could not tidy renamed quiet entities: %s", err)
+
     def _activity_time_from_state(self, key):
         """The sensor's current state as a datetime, if it has a usable one."""
         try:
@@ -1071,6 +1098,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         """Set up the coordinator."""
         self.is_initial_setup = True
         vin = self.vin
+        self._remove_renamed_quiet_entities()
 
         # Trip/efficiency statistics (#301). Load the persisted open/last trip
         # so a drive in progress survives a restart and the sensors repopulate.
@@ -2375,7 +2403,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 interval = min(interval, max(due - now, timedelta(minutes=1)))
             self.update_interval = interval
             LOGGER.debug(
-                "Quiet hours: next scheduled update reads SAIC's stored status "
+                "Quiet charging: next scheduled update reads SAIC's stored status "
                 "in %s.",
                 interval,
             )
@@ -2977,22 +3005,22 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         else:
             self.live_polling = not in_quiet_window(now.time(), start, end)
         LOGGER.info(
-            "Quiet hours for VIN %s: %s to %s; Live Polling %s",
+            "Quiet charging for VIN %s: %s to %s; Quiet Charging %s",
             self.vin,
             format_hhmm(start),
             format_hhmm(end),
-            "on" if self.live_polling else "off",
+            "off" if self.live_polling else "on",
         )
 
     async def _handle_quiet_hours_start(self, _now=None) -> None:
         """The start time: Live Polling goes off."""
         if self.quiet_hours:
-            await self.async_set_live_polling(False, reason="quiet hours started")
+            await self.async_set_live_polling(False, reason="start time")
 
     async def _handle_quiet_hours_end(self, _now=None) -> None:
         """The end time: Live Polling comes back on, with one live poll."""
         if self.quiet_hours:
-            await self.async_set_live_polling(True, reason="quiet hours ended")
+            await self.async_set_live_polling(True, reason="end time")
 
     async def async_set_live_polling(self, enabled: bool, reason: str = "switched") -> None:
         """Turn Live Polling on or off (the switch, an automation, or the times)."""
@@ -3002,8 +3030,8 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         if changed:
             self._save_live_polling()
             LOGGER.info(
-                "Quiet hours: Live Polling %s for VIN %s (%s)",
-                "on" if enabled else "off",
+                "Quiet charging: Quiet Charging %s for VIN %s (%s)",
+                "off" if enabled else "on",
                 self.vin,
                 reason,
             )
@@ -3032,7 +3060,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         self.hass.config_entries.async_update_entry(self.config_entry, options=new_options)
 
     async def async_set_quiet_hours_time(self, which: str, value) -> None:
-        """Set Quiet Hours Start or End, persisted in the options.
+        """Set Quiet Charging Start or End, persisted in the options.
 
         As with Holiday Mode, the options listener re-reads them and re-arms
         the times (async_update_options -> _start_quiet_hours).
@@ -3042,7 +3070,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         new_options = {**self.config_entry.options, key: format_hhmm(value)}
         self.hass.config_entries.async_update_entry(self.config_entry, options=new_options)
         LOGGER.info(
-            "Quiet hours %s set to %s for VIN %s", which, format_hhmm(value), self.vin
+            "Quiet Charging %s set to %s for VIN %s", which, format_hhmm(value), self.vin
         )
 
     async def _quiet_hours_update(self):
@@ -3057,7 +3085,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         if due is not None and now >= due - timedelta(seconds=30):
             self._quiet_finish_check_at = None
             LOGGER.info(
-                "Quiet hours: live poll for VIN %s to see whether the charge "
+                "Quiet charging: live poll for VIN %s to see whether the charge "
                 "has finished",
                 self.vin,
             )
@@ -3074,7 +3102,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                     reply = await read(self.vin)
             except Exception as err:  # noqa: BLE001 - a missed read is harmless
                 LOGGER.debug(
-                    "Quiet hours: reading the stored status failed for VIN %s: %s",
+                    "Quiet charging: reading the stored status failed for VIN %s: %s",
                     self.vin,
                     err,
                 )
@@ -3112,7 +3140,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         if reason is not None:
             self._quiet_polled_for_epoch = epoch
             LOGGER.info(
-                "Quiet hours: SAIC's stored status for VIN %s %s (taken %s); "
+                "Quiet charging: SAIC's stored status for VIN %s %s (taken %s); "
                 "one live poll to see whether it is charging",
                 self.vin,
                 reason,
@@ -3123,7 +3151,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             return data
 
         LOGGER.debug(
-            "Quiet hours: stored status for VIN %s read without contacting the "
+            "Quiet charging: stored status for VIN %s read without contacting the "
             "car (taken %s, charging flag %s); nothing new",
             self.vin,
             summary.get("status_time") if summary else None,
@@ -3178,7 +3206,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         delay = finish_check_delay(remaining)
         self._quiet_finish_check_at = utcnow() + delay
         LOGGER.info(
-            "Quiet hours: VIN %s should finish charging in %s; checking in %s",
+            "Quiet charging: VIN %s should finish charging in %s; checking in %s",
             self.vin,
             remaining if remaining is not None else "an unknown time",
             delay,
