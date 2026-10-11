@@ -1225,6 +1225,12 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 data = await self._quiet_hours_update()
             else:
                 data = await self._run_update_cycle()
+                if self.quiet_active and not self.is_powered_on:
+                    # A live poll from elsewhere during quiet hours (Update
+                    # Vehicle Data, an automation, a SAIC message) that finds
+                    # the car charging still needs the "has it finished?"
+                    # check, or HA shows Charging until the end time (#269).
+                    self._after_quiet_live_poll(data)
         except Exception as err:
             self._consecutive_update_failures += 1
             self._last_poll_result = DATA_FRESHNESS_FAILED

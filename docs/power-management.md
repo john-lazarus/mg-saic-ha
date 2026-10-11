@@ -127,6 +127,8 @@ Use it to gate charging automations — for example, only act on Charging Power 
 - **Update Vehicle Data** and any command you send.
 - The checks after you switch the car off.
 
+If one of those finds the car charging, the "has it finished?" check is set up from it, just as for quiet hours' own poll *(from 1.4.0-beta4)*. So an automation that presses **Update Vehicle Data** when your charger starts charging gives you the charge-start poll straight away, and quiet hours takes it from there.
+
 **Worth knowing:**
 - The stored status updates itself at the start of a charge on an MGS6 and an MG HS PHEV. Other models are still to be confirmed; a model that doesn't simply won't show a charge until the end time.
 - The live poll at the start of a charge is the one an HS PHEV owner may see as the lights coming on. The car also turns them on by itself when a charge starts or resumes, and quiet hours can't stop that.

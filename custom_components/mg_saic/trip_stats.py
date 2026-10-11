@@ -1109,6 +1109,26 @@ MIN_UNSEEN_CHARGE_SOC_PCT = 1.0
 MIN_UNSEEN_CHARGE_SOC_PCT_NO_RECORD = 2.0
 
 
+def _reading_differs(a: "ChargeSnapshot | None", b: "ChargeSnapshot | None") -> bool:
+    """Whether two readings differ in anything a charge is measured from.
+
+    The time of the reading doesn't count: a car sitting plugged in at the
+    same level gives the same reading every poll, and saving each one would
+    write to disk at every poll for nothing.
+    """
+    if (a is None) != (b is None):
+        return True
+    if a is None:
+        return False
+    return (
+        a.soc_pct != b.soc_pct
+        or a.record_start != b.record_start
+        or a.record_end != b.record_end
+        or a.odometer_km != b.odometer_km
+        or a.pack_energy_kwh != b.pack_energy_kwh
+    )
+
+
 def reconstruct_unseen_charge(
     before: "ChargeSnapshot | None",
     after: "ChargeSnapshot | None",
@@ -1680,15 +1700,25 @@ class TripStatsManager:
                 snapshot,
                 capacity_kwh=capacity_kwh,
             )
+            # Saved when they change, so a restart or reload doesn't lose the
+            # reading a charge is measured from. @HarryFlatter, 10 Oct: the
+            # integration reloaded at 14:58:02, mid solar top-up; the 14:44
+            # reading (70.2 %) had never been saved, so the charge was measured
+            # from its own first reading (71.3 %), gained nothing and was
+            # dropped.
+            new_pre = snapshot if is_plugged_in else None
+            changed = _reading_differs(
+                self.pre_charge_snapshot, new_pre
+            ) or _reading_differs(getattr(self, "idle_charge_reading", None), snapshot)
             self.idle_charge_reading = snapshot
-            self.pre_charge_snapshot = snapshot if is_plugged_in else None
+            self.pre_charge_snapshot = new_pre
             self.charge_paused_snapshot = None
             self.charge_progress = None
             self.open_charge_power = None
             if unseen is not None:
                 self.last_charge = unseen
                 return unseen, True
-            return None, False
+            return None, changed
 
         # A charge is open and the car is not charging. Paused, or over?
         current = snapshot
