@@ -48,6 +48,7 @@ from .quiet_hours import (
     remaining_charge_time,
     stored_charge_started,
     stored_charging_flag,
+    stored_rewrite_while_plugged,
     stored_status_epoch,
 )
 
@@ -228,6 +229,9 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # The last stored-status read made during quiet hours, for the
         # switch's attributes.
         self.quiet_last_stored: dict | None = None
+        # The stored copy (its statusTime) a quiet-hours live poll was last
+        # spent on, so one copy never buys two polls.
+        self._quiet_polled_for_epoch: int | None = None
         self._last_command_unreachable = False
         self._last_command_unreachable_time = None
         # Debounce for the code-4 'unreachable' signal: only flag after this many
@@ -1996,6 +2000,15 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             power_kw=self._pack_power_kw(chrg_mgmt_data),
         )
         if charge is not None:
+            if charge.get("reconstructed"):
+                LOGGER.info(
+                    "Charge recorded for VIN %s (reconstructed, not seen live): "
+                    "%s%% to %s%%, %s kWh",
+                    self.vin,
+                    charge.get("soc_start_pct"),
+                    charge.get("soc_end_pct"),
+                    charge.get("energy_added_kWh"),
+                )
             LOGGER.debug("Charge session completed for VIN %s: %s", self.vin, charge)
             self.trip_stats.fire_charge_event(charge)
         if changed:
@@ -3063,16 +3076,35 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 "status_time": summary.get("status_time"),
                 "charging_flag": flag,
             }
+        polled_for = getattr(self, "_quiet_polled_for_epoch", None)
+        reason = None
         if stored_charge_started(
             flag,
             epoch,
             known_charging=bool(self.is_charging),
             last_live_status_epoch=self._last_status_time,
+            already_polled_epoch=polled_for,
         ):
+            reason = "shows a charge started"
+        else:
+            plugged_in, soc_pct, target_pct = self._quiet_charge_context()
+            if stored_rewrite_while_plugged(
+                epoch,
+                known_charging=bool(self.is_charging),
+                plugged_in=plugged_in,
+                last_live_status_epoch=self._last_status_time,
+                already_polled_epoch=polled_for,
+                soc_pct=soc_pct,
+                target_pct=target_pct,
+            ):
+                reason = "was rewritten while plugged in"
+        if reason is not None:
+            self._quiet_polled_for_epoch = epoch
             LOGGER.info(
-                "Quiet hours: SAIC's stored status for VIN %s shows a charge "
-                "started (taken %s); one live poll to record it",
+                "Quiet hours: SAIC's stored status for VIN %s %s (taken %s); "
+                "one live poll to see whether it is charging",
                 self.vin,
+                reason,
                 summary.get("status_time"),
             )
             data = await self._run_update_cycle()
@@ -3089,6 +3121,21 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         if not getattr(self, "_action_interval_active", False):
             self._adjust_update_interval()
         return self.data
+
+    def _quiet_charge_context(self):
+        """From the last live poll: plugged in?, battery %, target %."""
+        data = self.data or {}
+        charging_data = data.get("charging")
+        status = data.get("status")
+        basic = getattr(status, "basicVehicleStatus", None) if status else None
+        rcs = getattr(charging_data, "rvsChargeStatus", None) if charging_data else None
+        gun = getattr(rcs, "chargingGunState", None) if rcs is not None else None
+        plugged_in = isinstance(gun, (int, bool)) and bool(gun)
+        return (
+            plugged_in,
+            self._extract_soc_pct(basic, charging_data),
+            self._target_soc_pct(charging_data),
+        )
 
     def _after_quiet_live_poll(self, data) -> None:
         """After a live poll in quiet hours: when to check for the end of a charge."""

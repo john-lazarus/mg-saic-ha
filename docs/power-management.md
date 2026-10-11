@@ -112,11 +112,15 @@ Use it to gate charging automations — for example, only act on Charging Power 
 **While Live Polling is off and the car is switched off:**
 
 - Scheduled polls read the stored status at your normal idle interval (or the Holiday Mode one), never faster, even while charging.
-- **When the stored status shows a charge has started**, one live poll records it, so Home Assistant shows **Charging** overnight. The car updates the stored status by itself when a charge starts, so this needs no help from your charger.
+- **When the stored status shows a charge may have started**, one live poll checks, so Home Assistant shows **Charging** overnight. The car updates the stored status by itself when a charge starts, so this needs no help from your charger. That is either:
+  - its charging flag on (MGS6), or
+  - *(from 1.4.0-beta3)* the stored status rewritten while the car is plugged in and below its target. An MG HS PHEV writes it the moment the charge starts, but before it is charging, so its flag is still off (#269). A car already at its target is left alone, so its routine reports every few hours cost nothing.
+
+  Each stored status buys one live poll at most: if the car turns out to be waiting for its slot, nothing more is asked until the stored status changes again.
 - **When the charge should have finished**, one live poll checks. The time comes from the car's own "time remaining" figure where it gives one, otherwise from the battery level, your target and the charging power, plus 15 minutes. If the car has not finished (a smart tariff pausing it, for example), nothing more is asked until the stored status shows charging has started again.
 - **At the end time**, Live Polling comes back on with one live poll to catch up.
 
-**What you give up:** live battery % and charging power during the night. The charge record is not affected: Last Charge Energy, Last Charge Duration and the rest use the car's own start and end times, which the next live poll collects.
+**What you give up:** live battery % and charging power during the night. A charge seen by the live poll at its start is recorded as normal. From 1.4.0-beta3, one that starts and finishes without a live poll seeing it (a car plugged in during quiet hours after Home Assistant last saw it unplugged, for example) is still recorded at the end time, from the battery % before and after, but without a duration: see *Charges no poll saw* in [Trip & efficiency statistics](sensors.md#trip--efficiency-statistics).
 
 **What still reaches the car:**
 - A car switched on during quiet hours is polled as normal.
@@ -124,7 +128,8 @@ Use it to gate charging automations — for example, only act on Charging Power 
 - The checks after you switch the car off.
 
 **Worth knowing:**
-- The stored status updates itself on an MGS6. Whether every model does the same is being tested; a model that doesn't simply won't show a charge until the end time.
+- The stored status updates itself at the start of a charge on an MGS6 and an MG HS PHEV. Other models are still to be confirmed; a model that doesn't simply won't show a charge until the end time.
+- The live poll at the start of a charge is the one an HS PHEV owner may see as the lights coming on. The car also turns them on by itself when a charge starts or resumes, and quiet hours can't stop that.
 - **Live Polling survives a Home Assistant restart** as you left it. If a start or end time passed while Home Assistant was down, that time's setting applies instead, so a restart can't leave it the wrong way round. With the default 22:00 to 07:00:
 
   | What happened | After the restart |

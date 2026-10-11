@@ -3847,6 +3847,9 @@ class SAICMGLastChargeEnergySensor(CoordinatorEntity, SensorEntity):
         "range_end_km",
         "duration_s",
         "duration_source",
+        # True for a charge that started and finished between two readings
+        # (quiet hours): the energy is known, the duration is not.
+        "reconstructed",
         "interruptions",
         "paused_s",
         "average_power_kW",
@@ -4004,8 +4007,10 @@ class SAICMGLastChargeDurationSensor(CoordinatorEntity, SensorEntity):
     _CHARGE_ATTR_KEYS = (
         # The exact figure, in seconds, that the state is rounded from.
         "duration_s",
-        # car / car_partial / polls: where the duration came from. car_partial
-        # means the real start was never seen, so the figure is too short.
+        # car / car_partial / polls / not_seen: where the duration came from.
+        # car_partial means the real start was never seen, so the figure is
+        # too short; not_seen, a charge no reading saw running, so there is
+        # no duration at all.
         "duration_source",
         "interruptions",
         "paused_s",

@@ -183,6 +183,59 @@ class FinishTimeTests(unittest.TestCase):
         self.assertEqual(QH.finish_check_delay(None), timedelta(hours=2))
 
 
+class StoredRewriteTests(unittest.TestCase):
+    """@HarryFlatter's HS PHEV, 11 Oct: the copy rewritten at 00:30:09, as the
+    charge started, with the charging flag still 0."""
+
+    LIVE = 1791672031  # 22:40:31 UTC, the 23:40 BST live poll's status
+
+    def _check(self, stored=1791675009, **kw):
+        args = dict(
+            known_charging=False,
+            plugged_in=True,
+            last_live_status_epoch=self.LIVE,
+            already_polled_epoch=None,
+            soc_pct=71.3,
+            target_pct=100.0,
+        )
+        args.update(kw)
+        return QH.stored_rewrite_while_plugged(stored, **args)
+
+    def test_harrys_charge_start(self):
+        self.assertTrue(self._check())
+
+    def test_the_live_polls_own_write_is_not_news(self):
+        # That poll's status 22:40:31, its write to the copy 22:40:33.
+        self.assertFalse(self._check(stored=self.LIVE + 2))
+
+    def test_one_copy_buys_one_poll(self):
+        self.assertFalse(self._check(already_polled_epoch=1791675009))
+        self.assertTrue(self._check(stored=1791686177, already_polled_epoch=1791675009))
+
+    def test_not_plugged_in(self):
+        self.assertFalse(self._check(plugged_in=False))
+
+    def test_already_known_to_be_charging(self):
+        self.assertFalse(self._check(known_charging=True))
+
+    def test_full_car_ignores_its_routine_reports(self):
+        self.assertFalse(self._check(soc_pct=100.0))
+
+    def test_unknown_battery_still_counts(self):
+        self.assertTrue(self._check(soc_pct=None))
+
+    def test_no_copy(self):
+        self.assertFalse(self._check(stored=None))
+
+    def test_the_flag_check_also_spends_a_copy_once(self):
+        self.assertFalse(
+            QH.stored_charge_started(
+                1, 1791675009, known_charging=False,
+                last_live_status_epoch=self.LIVE, already_polled_epoch=1791675009,
+            )
+        )
+
+
 # ── The coordinator ──────────────────────────────────────────────────────────
 
 
@@ -296,6 +349,53 @@ class QuietUpdateTests(unittest.TestCase):
         c.quiet_hours = False
         self._update(c)
         c._run_update_cycle.assert_awaited_once()
+
+
+def _plugged_in_data(soc_tenths=713, gun=1):
+    return {
+        "status": "old",
+        "charging": NS(
+            rvsChargeStatus=NS(chargingGunState=gun),
+            chrgMgmtData=NS(bmsPackSOCDsp=soc_tenths, bmsOnBdChrgTrgtSOCDspCmd=None),
+        ),
+    }
+
+
+class QuietRewriteUpdateTests(unittest.TestCase):
+    def _update(self, c):
+        with patch.object(COORD_MOD, "utcnow", lambda: NOW):
+            return _run(c._async_update_data())
+
+    def test_rewritten_while_plugged_in_gets_one_live_poll(self):
+        c = _coordinator(flag=0)
+        c.data = _plugged_in_data()
+        c._after_quiet_live_poll = MagicMock()
+        self.assertEqual(self._update(c)["status"], "new")
+        c._run_update_cycle.assert_awaited_once()
+        self.assertEqual(c._quiet_polled_for_epoch, LAST_LIVE + 3600)
+
+    def test_the_same_copy_does_not_buy_a_second(self):
+        # The live poll found it not charging (still waiting): the next read
+        # of the same copy must not poll again.
+        c = _coordinator(flag=0)
+        c.data = _plugged_in_data()
+        c._after_quiet_live_poll = MagicMock()
+        c._run_update_cycle = AsyncMock(side_effect=lambda: c.data)
+        self._update(c)
+        self._update(c)
+        c._run_update_cycle.assert_awaited_once()
+
+    def test_unplugged_car_is_left_alone(self):
+        c = _coordinator(flag=0)
+        c.data = _plugged_in_data(gun=0)
+        self._update(c)
+        c._run_update_cycle.assert_not_awaited()
+
+    def test_full_car_is_left_alone(self):
+        c = _coordinator(flag=0)
+        c.data = _plugged_in_data(soc_tenths=1000)
+        self._update(c)
+        c._run_update_cycle.assert_not_awaited()
 
 
 class FinishCheckTests(unittest.TestCase):

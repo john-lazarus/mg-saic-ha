@@ -1099,6 +1099,107 @@ def compute_charge_session(
     return result
 
 
+# A charge never seen live (see reconstruct_unseen_charge) must have raised the
+# battery by at least this much. Higher than MIN_CHARGE_SOC_PCT: with no
+# charging reading to go on, a small rise is more likely the pack's own
+# rebound or rounding than a charge.
+MIN_UNSEEN_CHARGE_SOC_PCT = 1.0
+# ...or this much when the car keeps no record of its last charge to confirm
+# that one ended in between.
+MIN_UNSEEN_CHARGE_SOC_PCT_NO_RECORD = 2.0
+
+
+def reconstruct_unseen_charge(
+    before: "ChargeSnapshot | None",
+    after: "ChargeSnapshot | None",
+    *,
+    capacity_kwh: float | None,
+) -> dict[str, Any] | None:
+    """A charge that started and finished between two readings, or None.
+
+    Neither reading charging, and the car not moved in between (plugged in or
+    not at the first: it may have been plugged in after it). Quiet hours
+    can do this: @HarryFlatter's HS PHEV, 11 Oct 2026, read at 23:40 plugged
+    in at 71 %, charged 00:30-02:24 with no live poll, read at 06:09 at 100 %.
+    Nothing had seen it charging, so no charge was recorded at all.
+
+    The car's own record is the evidence that a charge ended in between: its
+    end moved, and the new end lies between the two readings. That record
+    only covers the last stretch of the charge (02:13-02:17 that night), so
+    it gives the end, not the start, and no duration is claimed. The energy
+    comes from the battery's rise, as for any charge.
+    """
+    if before is None or after is None:
+        return None
+    if before.soc_pct is None or after.soc_pct is None:
+        return None
+    try:
+        seen_before = datetime.fromisoformat(before.ts).timestamp()
+        seen_after = datetime.fromisoformat(after.ts).timestamp()
+    except (TypeError, ValueError):
+        return None
+    if not 0 < seen_after - seen_before <= MAX_OPEN_CHARGE_SECONDS:
+        return None
+    if (
+        before.odometer_km is not None
+        and after.odometer_km is not None
+        and abs(after.odometer_km - before.odometer_km) > REGEN_ODOMETER_MOVED_KM
+    ):
+        return None  # driven in between: not a charge on its own
+    rise = round(after.soc_pct - before.soc_pct, 1)
+    rec_end = getattr(after, "record_end", None)
+    if rec_end:
+        if rec_end == getattr(before, "record_end", None):
+            return None  # the car's last charge is still the one from before
+        if not (seen_before <= rec_end <= seen_after + CAR_RECORD_END_SLACK_S):
+            return None
+        if rise < MIN_UNSEEN_CHARGE_SOC_PCT:
+            return None
+    elif rise < MIN_UNSEEN_CHARGE_SOC_PCT_NO_RECORD:
+        return None
+
+    result: dict[str, Any] = {
+        "start_ts": before.ts,
+        "end_ts": after.ts,
+        "reconstructed": True,
+        "duration_source": "not_seen",
+        "soc_start_pct": before.soc_pct,
+        "soc_end_pct": after.soc_pct,
+        "soc_added_pct": rise,
+    }
+    if rec_end:
+        result["charge_end_ts"] = datetime.fromtimestamp(
+            rec_end, timezone.utc
+        ).isoformat()
+    energy_soc = (
+        round(rise / 100.0 * capacity_kwh, 3) if capacity_kwh else None
+    )
+    energy_counter = None
+    if before.pack_energy_kwh is not None and after.pack_energy_kwh is not None:
+        delta = round(after.pack_energy_kwh - before.pack_energy_kwh, 3)
+        if delta > 0 and (capacity_kwh is None or delta <= capacity_kwh * 1.05):
+            energy_counter = delta
+    if energy_soc is None and energy_counter is None:
+        return None
+    result["energy_added_kWh"] = (
+        energy_soc if energy_soc is not None else energy_counter
+    )
+    result["method"] = "soc" if energy_soc is not None else "counter"
+    if energy_soc is not None:
+        result["energy_added_kWh_soc"] = energy_soc
+    if energy_counter is not None:
+        result["energy_added_kWh_counter"] = energy_counter
+    if before.range_km is not None and after.range_km is not None:
+        range_added = round(after.range_km - before.range_km, 1)
+        result["range_start_km"] = before.range_km
+        result["range_end_km"] = after.range_km
+        if range_added >= 0:
+            result["range_added_km"] = range_added
+    if before.odometer_km is not None:
+        result["odometer_km"] = before.odometer_km
+    return result
+
+
 # HA imports are done lazily inside methods so the pure functions above can be
 # imported and unit-tested without Home Assistant installed.
 
@@ -1153,6 +1254,11 @@ class TripStatsManager:
         # charge baseline when a session opens, so energy delivered before the
         # first "charging" poll is not lost (see note_charge_state).
         self.pre_charge_snapshot: "ChargeSnapshot | None" = None
+        # The last reading with no charge open and the car not charging,
+        # plugged in or not. A whole charge between it and the next reading is
+        # recorded from the two (see reconstruct_unseen_charge). None while a
+        # charge is open.
+        self.idle_charge_reading: "ChargeSnapshot | None" = None
         # Charging-session tracking (#262): the snapshot taken when a charge
         # started, and the last completed charge. Powers the Last Charge Energy
         # sensor — the API has no "energy added by that charge" field.
@@ -1214,6 +1320,11 @@ class TripStatsManager:
         self.pre_charge_snapshot = ChargeSnapshot.from_dict(
             data.get("pre_charge_snapshot")
         )
+        self.idle_charge_reading = (
+            None
+            if self.open_charge
+            else ChargeSnapshot.from_dict(data.get("idle_charge_reading"))
+        )
         self.charge_progress = (
             data.get("charge_progress") if self.open_charge else None
         )
@@ -1259,6 +1370,11 @@ class TripStatsManager:
                 "pre_charge_snapshot": (
                     self.pre_charge_snapshot.to_dict()
                     if self.pre_charge_snapshot
+                    else None
+                ),
+                "idle_charge_reading": (
+                    self.idle_charge_reading.to_dict()
+                    if self.idle_charge_reading
                     else None
                 ),
                 "charge_progress": (
@@ -1484,6 +1600,7 @@ class TripStatsManager:
             return None, False
 
         if is_charging:
+            self.idle_charge_reading = None
             if self.open_charge is None:
                 # Prefer a snapshot taken while plugged in but not yet
                 # charging. Charging routinely starts between polls -- on a
@@ -1552,10 +1669,25 @@ class TripStatsManager:
         # to it. Cleared when unplugged so a snapshot from a previous session
         # can never leak into the next one.
         if self.open_charge is None:
+            # A whole charge between two readings, neither of which saw it
+            # charging (quiet hours, or a long polling interval). Also when
+            # the car now says "waiting" rather than finished: an HS PHEV
+            # reads Connecting after a charge that stopped short of full, and
+            # the car's record shows that stretch ended. If it resumes later,
+            # that is recorded as a charge of its own.
+            unseen = reconstruct_unseen_charge(
+                getattr(self, "idle_charge_reading", None),
+                snapshot,
+                capacity_kwh=capacity_kwh,
+            )
+            self.idle_charge_reading = snapshot
             self.pre_charge_snapshot = snapshot if is_plugged_in else None
             self.charge_paused_snapshot = None
             self.charge_progress = None
             self.open_charge_power = None
+            if unseen is not None:
+                self.last_charge = unseen
+                return unseen, True
             return None, False
 
         # A charge is open and the car is not charging. Paused, or over?
@@ -1593,6 +1725,7 @@ class TripStatsManager:
         # The latest reading, not the one the charge is closed against, is
         # what a following charge would start from.
         self.pre_charge_snapshot = current if is_plugged_in else None
+        self.idle_charge_reading = current
         self.charge_paused_snapshot = None
         start = self.open_charge
         car_record = self.open_charge_record
