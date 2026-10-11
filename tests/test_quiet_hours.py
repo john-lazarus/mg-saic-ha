@@ -398,6 +398,46 @@ class QuietRewriteUpdateTests(unittest.TestCase):
         c._run_update_cycle.assert_not_awaited()
 
 
+class OtherLivePollsTests(unittest.TestCase):
+    """A live poll from elsewhere in quiet hours (Update Vehicle Data, an
+    automation, a SAIC message) still sets up the finish check (#269)."""
+
+    def _update(self, c):
+        with patch.object(COORD_MOD, "utcnow", lambda: NOW):
+            return _run(c._async_update_data())
+
+    def test_a_requested_poll_that_finds_it_charging_sets_the_check(self):
+        c = _coordinator(flag=0)
+        c._scheduled_refresh = False
+        c._after_quiet_live_poll = MagicMock()
+        data = self._update(c)
+        c._run_update_cycle.assert_awaited_once()
+        c._after_quiet_live_poll.assert_called_once_with(data)
+
+    def test_not_in_quiet_hours_nothing_extra(self):
+        c = _coordinator(flag=0)
+        c._scheduled_refresh = False
+        c.live_polling = True
+        c._after_quiet_live_poll = MagicMock()
+        self._update(c)
+        c._after_quiet_live_poll.assert_not_called()
+
+    def test_a_car_switched_on_is_left_to_normal_polling(self):
+        c = _coordinator(flag=0)
+        c._scheduled_refresh = False
+        c.is_powered_on = True
+        c._after_quiet_live_poll = MagicMock()
+        self._update(c)
+        c._after_quiet_live_poll.assert_not_called()
+
+    def test_end_to_end_the_check_is_set(self):
+        c = _coordinator(flag=0, charging=True)
+        c._scheduled_refresh = False
+        c._schedule_quiet_finish_check = MagicMock()
+        self._update(c)
+        c._schedule_quiet_finish_check.assert_called_once_with(None, "new")
+
+
 class FinishCheckTests(unittest.TestCase):
     def _charging_data(self, **chrg):
         values = dict(
