@@ -125,7 +125,7 @@ Also in the attributes: `range_added_km` (with `range_start_km` / `range_end_km`
 | `charge_start_ts` | When the first stretch started, from the car's record |
 | `charge_end_ts` | When the charge ended (only once it has) |
 | `as_of` | The reading the figure was worked out from (only while in progress) |
-| `duration_source` | `car`, `car_partial` or `polls`, as described above and below |
+| `duration_source` | `car`, `car_partial`, `polls` or `not_seen`, as described above and below |
 
 A charge on a 30-minute polling interval that ran in four stretches (1413 s, 2857 s, 1559 s and 356 s, with three pauses of under a minute):
 
@@ -157,6 +157,15 @@ The Charging Duration readings can't be added up to the total: each one is how f
 - `duration_source: car_partial` means an earlier stretch began and ended between two polls, so the real start was never seen. The duration is then too short (**Last Charge Duration** carries the same `duration_source`, so you can tell), and `average_power_kW` is left out rather than overstated.
 
 Before 1.3.0-beta9 only the last stretch was counted: a 1 h 44 min charge at about 5 kW, with two half-minute pauses, showed as 26 minutes at 19.8 kW (#262).
+
+**Charges no poll saw.** *(From 1.4.0-beta3.)* A charge can start and finish between two polls: overnight with [Quiet hours](power-management.md#quiet-hours), or on a long polling interval. If the car was plugged in at the poll before, and the poll after finds the battery higher and the car's own record showing a charge that ended in between, the charge is still recorded:
+
+- `reconstructed: true` on **Last Charge Energy**, and `duration_source: not_seen`.
+- Energy and range added come from the battery % before and after, as for any charge.
+- `charge_end_ts` is when the car says the charge ended.
+- There is no duration: the car's record only covers the last stretch of the charge, so **Last Charge Duration** and **Charge Session Duration** read unknown, and there is no average power.
+
+Before 1.4.0-beta3 such a charge was not recorded at all, and Last Charge kept showing the previous one (#269).
 
 
 ### Working out your charging losses

@@ -19,12 +19,20 @@ reading that does not contact the car. Tested on an MGS6, 6-7 Oct 2026:
 - 3 reads in 28 came back with nonsense values, so only the time and the
   charging flag are used.
 
+An MG HS PHEV is different (@HarryFlatter, 11 Oct 2026, zappi; @paulfcarney-
+ship-it, 10 Oct, granny charger): it writes the copy when the charge starts
+(00:30:09, to the second) but before it is charging, so the flag is still 0,
+and does not write again until well after the charge. So a rewrite of the
+copy while the car is plugged in, short of its target, also counts as "a
+charge may have started".
+
 So, between a start and an end time the owner sets, while the Live Polling
 switch is off and the car is switched off:
 
 - each scheduled poll becomes a read of the stored copy instead;
-- when that read shows a charge has started since the last live poll, one
-  live poll records it (and, on an HS, flashes the lights once);
+- when that read shows a charge has started since the last live poll -- the
+  flag on, or the copy rewritten while plugged in and short of the target --
+  one live poll records it (and, on an HS, flashes the lights once);
 - one live poll when the charge should have finished, from the car's own
   "time remaining" or the battery level, target and power. Owners report the
   lights only flash while charging, so by then it normally will not. If the
@@ -64,6 +72,10 @@ FINISH_CHECK_MIN = timedelta(minutes=15)
 FINISH_CHECK_FALLBACK = timedelta(hours=2)
 # Below this the "power" is a car waiting, not charging, and gives no estimate.
 MIN_CHARGING_POWER_KW = 0.3
+# A live poll writes the stored copy too, a second or two after the status it
+# returns (HS PHEV: 22:40:31 returned, 22:40:33 stored). A copy no newer than
+# this after the last live status is that poll's own write, not news.
+STORED_REWRITE_MARGIN_S = 120
 
 
 def parse_hhmm(value: Any, default: time) -> time:
@@ -185,18 +197,58 @@ def stored_charge_started(
     *,
     known_charging: bool,
     last_live_status_epoch: Optional[int],
+    already_polled_epoch: Optional[int] = None,
 ) -> bool:
     """Whether the stored copy says a charge has started that we have not seen.
 
     The flag must be on, the integration must not already think the car is
     charging, and the copy must be newer than the status the last live poll
-    returned -- so a flag left over from before that poll can't fire it again.
+    returned -- so a flag left over from before that poll can't fire it again
+    -- and than any copy a live poll has already been spent on.
     """
     if flag != 1 or known_charging or stored_epoch is None:
+        return False
+    if already_polled_epoch is not None and stored_epoch <= already_polled_epoch:
         return False
     if last_live_status_epoch is None:
         return True
     return stored_epoch > last_live_status_epoch
+
+
+def stored_rewrite_while_plugged(
+    stored_epoch: Optional[int],
+    *,
+    known_charging: bool,
+    plugged_in: bool,
+    last_live_status_epoch: Optional[int],
+    already_polled_epoch: Optional[int],
+    soc_pct: Optional[float],
+    target_pct: Optional[float],
+) -> bool:
+    """Whether the car has rewritten the stored copy while waiting to charge.
+
+    An MG HS PHEV writes the copy at the moment a charge starts, but with the
+    charging flag still 0. So: plugged in, not already known to be charging,
+    short of its target (a full car has nothing to charge, and its routine
+    reports every few hours are not news), and a copy newer than both the
+    last live status (beyond that poll's own write) and any copy a live poll
+    has already been spent on.
+    """
+    if known_charging or not plugged_in or stored_epoch is None:
+        return False
+    if already_polled_epoch is not None and stored_epoch <= already_polled_epoch:
+        return False
+    if (
+        last_live_status_epoch is not None
+        and stored_epoch <= last_live_status_epoch + STORED_REWRITE_MARGIN_S
+    ):
+        return False
+    numbers = (soc_pct, target_pct)
+    if all(
+        isinstance(v, (int, float)) and not isinstance(v, bool) for v in numbers
+    ) and soc_pct >= target_pct:
+        return False
+    return True
 
 
 def remaining_charge_time(
