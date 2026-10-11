@@ -7,6 +7,24 @@ with the standard library only.
 from datetime import timedelta
 
 
+def charging_data_for_controls(coordinator):
+    """The charging data the charging controls show and act on.
+
+    The latest reply when there is one, otherwise the last one the car gave.
+    A car can stop answering the charging request for hours while everything
+    else works (#419, @SteveMSJ's MG4: return code 4 for 21 hours). The
+    settings these controls show (target, current limit, schedule) don't
+    change by themselves, and the car still accepts the commands, so the
+    controls stay usable on the last known values instead of going
+    unavailable.
+    """
+    data = getattr(coordinator, "data", None) or {}
+    current = data.get("charging")
+    if current is not None:
+        return current
+    return getattr(coordinator, "last_charging_data", None)
+
+
 def normalize_sunroof_action(action):
     """Normalize a sunroof action to `(should_open, action_name)`."""
     if isinstance(action, bool):

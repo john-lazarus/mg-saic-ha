@@ -7,6 +7,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 from .api import CommandsLimitReachedException, VehicleNotLockedException
 from .backends import Feature
+from .logic import charging_data_for_controls
 from .const import (
     DOMAIN,
     LOGGER,
@@ -156,7 +157,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
     switches.append(SAICMGHolidayModeSwitch(coordinator, entry, vin_info, vin))
     if getattr(coordinator, "quiet_hours", False):
         switches.append(
-            SAICMGQuietHoursLivePollingSwitch(coordinator, entry, vin_info, vin)
+            SAICMGQuietChargingSwitch(coordinator, entry, vin_info, vin)
         )
 
     async_add_entities(switches)
@@ -227,8 +228,15 @@ class SAICMGBatteryHeatingSwitch(CoordinatorEntity, SwitchEntity):
 
     @property
     def is_on(self):
-        """Return true if battery heating is active."""
+        """Return true if battery heating is active.
+
+        Unknown (None) when the latest poll got no charging data: whether it
+        is heating is a live state, so the last answer isn't shown as
+        current. The switch stays usable (#419).
+        """
         charging_data = self.coordinator.data.get("charging")
+        if charging_data is None:
+            return None
         if charging_data:
             chrgMgmtData = getattr(charging_data, "chrgMgmtData", None)
             if chrgMgmtData:
@@ -241,7 +249,7 @@ class SAICMGBatteryHeatingSwitch(CoordinatorEntity, SwitchEntity):
         """Return True if the switch entity is available."""
         return (
             self.coordinator.last_update_success
-            and self.coordinator.data.get("charging") is not None
+            and charging_data_for_controls(self.coordinator) is not None
         )
 
     async def async_turn_on(self, **kwargs):
@@ -404,7 +412,7 @@ class SAICMGChargingPortLockSwitch(CoordinatorEntity, SwitchEntity):
     @property
     def is_on(self):
         """Return true if the charging port is locked."""
-        charging_data = self.coordinator.data.get("charging")
+        charging_data = charging_data_for_controls(self.coordinator)
         if charging_data:
             lock_status = getattr(
                 charging_data.chrgMgmtData, "ccuEleccLckCtrlDspCmd", None
@@ -469,8 +477,15 @@ class SAICMGChargingSwitch(CoordinatorEntity, SwitchEntity):
 
     @property
     def is_on(self):
-        """Return true if charging is active."""
+        """Return true if charging is active.
+
+        Unknown (None) when the latest poll got no charging data, rather than
+        the last answer: whether it is charging is a live state. The switch
+        stays usable (#419).
+        """
         charging_data = self.coordinator.data.get("charging")
+        if charging_data is None:
+            return None
         if charging_data:
             chrgMgmtData = getattr(charging_data, "chrgMgmtData", None)
             if chrgMgmtData:
@@ -483,7 +498,7 @@ class SAICMGChargingSwitch(CoordinatorEntity, SwitchEntity):
         """Return True if the switch entity is available."""
         return (
             self.coordinator.last_update_success
-            and self.coordinator.data.get("charging") is not None
+            and charging_data_for_controls(self.coordinator) is not None
         )
 
     async def async_turn_on(self, **kwargs):
@@ -983,15 +998,19 @@ class SAICMGHolidayModeSwitch(CoordinatorEntity, SwitchEntity):
         self.async_write_ha_state()
 
 
-class SAICMGQuietHoursLivePollingSwitch(CoordinatorEntity, SwitchEntity):
-    """Quiet Hours Live Polling (#269).
+class SAICMGQuietChargingSwitch(CoordinatorEntity, SwitchEntity):
+    """Quiet Charging (#269).
 
-    On: polling as normal. Off: scheduled polls read SAIC's stored status
-    instead of waking the car, with one live poll when a charge starts and
-    one when it should have finished (see quiet_hours.py). Quiet Hours Start
-    turns it off and Quiet Hours End turns it back on; the owner, or an
-    automation, can flip it in between. Only present when Quiet hours is
-    ticked in the integration's options.
+    On: quiet -- scheduled polls read SAIC's stored status instead of waking
+    the car, with one live poll when a charge starts and one when it should
+    have finished (see quiet_hours.py). Off: polling as normal. Quiet
+    Charging Start turns it on and Quiet Charging End turns it off; the
+    owner, or an automation, can flip it in between. Only present when
+    Quiet charging is ticked in the integration's options.
+
+    Named "Quiet Hours Live Polling", with on and off the other way round,
+    in 1.4.0-beta1 to beta4: @HarryFlatter and James both read it backwards,
+    and Harry suggested the name.
     """
 
     _attr_entity_category = EntityCategory.CONFIG
@@ -999,10 +1018,8 @@ class SAICMGQuietHoursLivePollingSwitch(CoordinatorEntity, SwitchEntity):
     def __init__(self, coordinator, entry, vin_info, vin):
         super().__init__(coordinator)
         self._vin = vin
-        self._attr_name = (
-            f"{vin_info.brandName} {vin_info.modelName} Quiet Hours Live Polling"
-        )
-        self._attr_unique_id = f"{entry.entry_id}_{vin}_quiet_hours_live_polling"
+        self._attr_name = f"{vin_info.brandName} {vin_info.modelName} Quiet Charging"
+        self._attr_unique_id = f"{entry.entry_id}_{vin}_quiet_charging"
         self._device_info = create_device_info(coordinator, entry.entry_id)
 
     @property
@@ -1011,11 +1028,12 @@ class SAICMGQuietHoursLivePollingSwitch(CoordinatorEntity, SwitchEntity):
 
     @property
     def icon(self):
-        return "mdi:access-point" if self.is_on else "mdi:sleep"
+        return "mdi:sleep" if self.is_on else "mdi:access-point"
 
     @property
     def is_on(self):
-        return bool(getattr(self.coordinator, "live_polling", True))
+        """Quiet now: the coordinator's Live Polling is off."""
+        return not bool(getattr(self.coordinator, "live_polling", True))
 
     @property
     def available(self):
@@ -1026,8 +1044,8 @@ class SAICMGQuietHoursLivePollingSwitch(CoordinatorEntity, SwitchEntity):
     def extra_state_attributes(self):
         c = self.coordinator
         attrs = {
-            "quiet_hours_start": f"{c.quiet_hours_start:%H:%M}",
-            "quiet_hours_end": f"{c.quiet_hours_end:%H:%M}",
+            "quiet_charging_start": f"{c.quiet_hours_start:%H:%M}",
+            "quiet_charging_end": f"{c.quiet_hours_end:%H:%M}",
         }
         due = getattr(c, "quiet_finish_check_at", None)
         if due is not None:
@@ -1040,11 +1058,11 @@ class SAICMGQuietHoursLivePollingSwitch(CoordinatorEntity, SwitchEntity):
         return attrs
 
     async def async_turn_on(self, **kwargs):
-        await self.coordinator.async_set_live_polling(True, reason="switched on")
+        await self.coordinator.async_set_live_polling(False, reason="switched on")
         self.async_write_ha_state()
 
     async def async_turn_off(self, **kwargs):
-        await self.coordinator.async_set_live_polling(False, reason="switched off")
+        await self.coordinator.async_set_live_polling(True, reason="switched off")
         self.async_write_ha_state()
 
 

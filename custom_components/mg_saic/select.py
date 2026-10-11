@@ -3,6 +3,7 @@
 from homeassistant.components.select import SelectEntity
 from homeassistant.components.climate import HVACMode
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from .logic import charging_data_for_controls
 from .const import (
     DOMAIN,
     LOGGER,
@@ -144,7 +145,7 @@ class SAICMGChargingCurrentSelect(CoordinatorEntity, SelectEntity):
     @property
     def current_option(self):
         """Return the current selected option."""
-        charging_data = self.coordinator.data.get("charging")
+        charging_data = charging_data_for_controls(self.coordinator)
         if charging_data:
             chrg_mgmt_data = getattr(charging_data, "chrgMgmtData", None)
             if chrg_mgmt_data:
@@ -171,7 +172,7 @@ class SAICMGChargingCurrentSelect(CoordinatorEntity, SelectEntity):
         """Return True if the entity is available."""
         return (
             self.coordinator.last_update_success
-            and self.coordinator.data.get("charging") is not None
+            and charging_data_for_controls(self.coordinator) is not None
         )
 
     async def async_select_option(self, option: str):
@@ -181,7 +182,7 @@ class SAICMGChargingCurrentSelect(CoordinatorEntity, SelectEntity):
             selected_code = ChargeCurrentLimitOption.to_code(option)
 
             # Get the current target_soc from coordinator's data
-            charging_data = self.coordinator.data.get("charging")
+            charging_data = charging_data_for_controls(self.coordinator)
             if not charging_data:
                 LOGGER.error(
                     "No charging data available to set charging current limit."
@@ -284,7 +285,7 @@ class SAICMGScheduledChargingModeSelect(CoordinatorEntity, SelectEntity):
     @property
     def current_option(self):
         """Return the currently active scheduled charging mode."""
-        charging_data = self.coordinator.data.get("charging")
+        charging_data = charging_data_for_controls(self.coordinator)
         chrg_mgmt_data = getattr(charging_data, "chrgMgmtData", None)
         if chrg_mgmt_data is None:
             return None
@@ -310,7 +311,7 @@ class SAICMGScheduledChargingModeSelect(CoordinatorEntity, SelectEntity):
         """Return True if the entity is available."""
         return (
             self.coordinator.last_update_success
-            and self.coordinator.data.get("charging") is not None
+            and charging_data_for_controls(self.coordinator) is not None
         )
 
     def _resolve_window(self):
@@ -321,7 +322,7 @@ class SAICMGScheduledChargingModeSelect(CoordinatorEntity, SelectEntity):
             decode_scheduled_charging_field,
         )
 
-        charging_data = self.coordinator.data.get("charging")
+        charging_data = charging_data_for_controls(self.coordinator)
         chrg_mgmt_data = getattr(charging_data, "chrgMgmtData", None)
 
         start = self.coordinator.scheduled_charging_pending_start

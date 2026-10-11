@@ -9,6 +9,7 @@ from homeassistant.util import dt as dt_util
 
 from .api import CommandsLimitReachedException, VehicleNotLockedException
 from .backends import Feature
+from .logic import charging_data_for_controls
 from .const import DOMAIN, LOGGER
 from .utils import create_device_info
 
@@ -243,7 +244,7 @@ class SAICMGScheduledChargingTime(CoordinatorEntity, TimeEntity):
         if pending is not None:
             return pending
 
-        charging_data = self.coordinator.data.get("charging")
+        charging_data = charging_data_for_controls(self.coordinator)
         chrg_mgmt_data = getattr(charging_data, "chrgMgmtData", None)
         decoded = decode_scheduled_charging_field(
             chrg_mgmt_data, self._hour_attr, self._minute_attr
@@ -257,7 +258,7 @@ class SAICMGScheduledChargingTime(CoordinatorEntity, TimeEntity):
         """Return True if the entity is available."""
         return (
             self.coordinator.last_update_success
-            and self.coordinator.data.get("charging") is not None
+            and charging_data_for_controls(self.coordinator) is not None
         )
 
     async def async_set_value(self, value: time) -> None:
@@ -277,11 +278,12 @@ class SAICMGScheduledChargingTime(CoordinatorEntity, TimeEntity):
 
 
 class SAICMGQuietHoursTime(CoordinatorEntity, TimeEntity):
-    """Quiet Hours Start / Quiet Hours End (#269).
+    """Quiet Charging Start / Quiet Charging End (#269).
 
-    When Quiet Hours Live Polling turns off and back on. Local time, kept in
-    the integration's options so it survives a restart. Only present when
-    Quiet hours is ticked in the integration's options.
+    When Quiet Charging turns on and back off. Local time, kept in the
+    integration's options so it survives a restart. Only present when Quiet
+    charging is ticked in the integration's options. (Quiet Hours Start /
+    End in 1.4.0-beta1 to beta4.)
     """
 
     _attr_entity_category = EntityCategory.CONFIG
@@ -291,9 +293,9 @@ class SAICMGQuietHoursTime(CoordinatorEntity, TimeEntity):
         self._which = which
         label = "Start" if which == "start" else "End"
         self._attr_name = (
-            f"{vin_info.brandName} {vin_info.modelName} Quiet Hours {label}"
+            f"{vin_info.brandName} {vin_info.modelName} Quiet Charging {label}"
         )
-        self._attr_unique_id = f"{entry.entry_id}_{vin}_quiet_hours_{which}"
+        self._attr_unique_id = f"{entry.entry_id}_{vin}_quiet_charging_{which}"
         self._attr_icon = "mdi:weather-night" if which == "start" else "mdi:weather-sunny"
         self._device_info = create_device_info(coordinator, entry.entry_id)
 

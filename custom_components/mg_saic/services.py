@@ -7,6 +7,7 @@ import voluptuous as vol
 
 from .backends import Feature, backend_supports
 from .api import CommandsLimitReachedException, VehicleNotLockedException
+from .logic import charging_data_for_controls
 from .const import (
     DOMAIN,
     LOGGER,
@@ -561,7 +562,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             if not _backend_allows(client, vin, Feature.SCHEDULED_CHARGING, "set_scheduled_charging"):
                 return
 
-            charging_data = coordinator.data.get("charging")
+            charging_data = charging_data_for_controls(coordinator)
             chrg_mgmt_data = getattr(charging_data, "chrgMgmtData", None)
 
             start_time = call.data.get("start_time")
@@ -616,7 +617,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             selected_code = ChargeCurrentLimitOption.to_code(current_limit)
 
             # Get the current target_soc from coordinator's data
-            charging_data = coordinator.data.get("charging")
+            charging_data = charging_data_for_controls(coordinator)
             if not charging_data:
                 LOGGER.error(
                     "No charging data available to set charging current limit."
