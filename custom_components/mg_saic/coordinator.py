@@ -48,6 +48,7 @@ from .quiet_hours import (
     remaining_charge_time,
     stored_charge_started,
     stored_charging_flag,
+    stored_lock_status,
     stored_rewrite_while_plugged,
     stored_status_epoch,
 )
@@ -1689,7 +1690,9 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         chrg = getattr(charging_data, "chrgMgmtData", None) if charging_data else None
         raw = getattr(chrg, "bmsPackSOCDsp", None) if chrg is not None else None
         if raw is not None and raw != -128:
-            return raw * DATA_DECIMAL_CORRECTION_SOC
+            # Rounded: the car reports tenths, and 493 * 0.1 is
+            # 49.300000000000004, which ended up in charge records as is.
+            return round(raw * DATA_DECIMAL_CORRECTION_SOC, 1)
         raw = getattr(basic_status, "extendedData1", None) if basic_status else None
         if raw is not None and raw not in (-128, -1):
             return float(raw)
@@ -3126,7 +3129,11 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         ):
             reason = "shows a charge started"
         else:
-            plugged_in, soc_pct, target_pct = self._quiet_charge_context()
+            plugged_in, soc_pct, target_pct, live_lock = self._quiet_charge_context()
+            copy_lock = stored_lock_status(summary)
+            lock_changed = (
+                copy_lock is not None and live_lock is not None and copy_lock != live_lock
+            )
             if stored_rewrite_while_plugged(
                 epoch,
                 known_charging=bool(self.is_charging),
@@ -3135,8 +3142,15 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 already_polled_epoch=polled_for,
                 soc_pct=soc_pct,
                 target_pct=target_pct,
+                lock_changed=lock_changed,
             ):
-                reason = "was rewritten while plugged in"
+                reason = (
+                    "was rewritten while plugged in"
+                    if plugged_in
+                    else "was rewritten with the car unlocked since the last poll"
+                    if copy_lock == 0
+                    else "was rewritten with the lock state changed"
+                )
         if reason is not None:
             self._quiet_polled_for_epoch = epoch
             LOGGER.info(
@@ -3162,7 +3176,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         return self.data
 
     def _quiet_charge_context(self):
-        """From the last live poll: plugged in?, battery %, target %."""
+        """From the last live poll: plugged in?, battery %, target %, lock."""
         data = self.data or {}
         charging_data = data.get("charging")
         status = data.get("status")
@@ -3170,10 +3184,14 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         rcs = getattr(charging_data, "rvsChargeStatus", None) if charging_data else None
         gun = getattr(rcs, "chargingGunState", None) if rcs is not None else None
         plugged_in = isinstance(gun, (int, bool)) and bool(gun)
+        lock = getattr(basic, "lockStatus", None) if basic is not None else None
+        if isinstance(lock, bool) or lock not in (0, 1):
+            lock = None
         return (
             plugged_in,
             self._extract_soc_pct(basic, charging_data),
             self._target_soc_pct(charging_data),
+            lock,
         )
 
     def _after_quiet_live_poll(self, data) -> None:
