@@ -163,7 +163,8 @@ Before 1.3.0-beta9 only the last stretch was counted: a 1 h 44 min charge at abo
 - `reconstructed: true` on **Last Charge Energy**, and `duration_source: not_seen`.
 - Energy and range added come from the battery % before and after, as for any charge.
 - `charge_end_ts` is when the car says the charge ended.
-- There is no duration: the car's record only covers the last stretch of the charge, so **Last Charge Duration** and **Charge Session Duration** read unknown, and there is no average power.
+- The duration comes from the car's record when it's believable *(from 1.4.0-beta6)*: it started after the poll before, and the energy over it is a real charging rate (22 kW or less). That record restarts whenever charging restarts, so it may still miss an earlier stretch: it's marked `duration_source: car_partial`, and there's no average power. One granny-charger night: 5 h 46 min, the whole charge.
+- When the record isn't believable (an HS PHEV night where it covered only the last 4 minutes of a 1 h 47 min charge), there's no duration: `duration_source: not_seen`, and **Last Charge Duration** and **Charge Session Duration** read unknown.
 
 Before 1.4.0-beta3 such a charge was not recorded at all, and Last Charge kept showing the previous one (#269).
 

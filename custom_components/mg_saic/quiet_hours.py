@@ -183,6 +183,15 @@ def stored_charging_flag(summary: Optional[dict]) -> Optional[int]:
     return flag
 
 
+def stored_lock_status(summary: Optional[dict]) -> Optional[int]:
+    """The stored copy's lock state (1 locked, 0 unlocked), or None."""
+    fields = (summary or {}).get("fields") or {}
+    value = fields.get("lockStatus")
+    if isinstance(value, bool) or not isinstance(value, int) or value not in (0, 1):
+        return None
+    return value
+
+
 def stored_status_epoch(reply: Any) -> Optional[int]:
     """When SAIC last heard from the car (the reply's statusTime), or None."""
     raw = getattr(reply, "statusTime", None) if reply is not None else None
@@ -224,8 +233,9 @@ def stored_rewrite_while_plugged(
     already_polled_epoch: Optional[int],
     soc_pct: Optional[float],
     target_pct: Optional[float],
+    lock_changed: bool = False,
 ) -> bool:
-    """Whether the car has rewritten the stored copy while waiting to charge.
+    """Whether the car has rewritten the stored copy as a charge may start.
 
     An MG HS PHEV writes the copy at the moment a charge starts, but with the
     charging flag still 0. So: plugged in, not already known to be charging,
@@ -233,8 +243,17 @@ def stored_rewrite_while_plugged(
     reports every few hours are not news), and a copy newer than both the
     last live status (beyond that poll's own write) and any copy a live poll
     has already been spent on.
+
+    ``lock_changed``: the copy's lock state differs from the last live
+    poll's. Counts instead of "plugged in" for a car Home Assistant last saw
+    unplugged: @paulfcarney-ship-it's HS PHEV, 11 Oct, last polled unplugged
+    and locked at 18:52, plugged in at 19:02 after quiet charging started --
+    the copy written then said unlocked. A routine report doesn't change the
+    lock state.
     """
-    if known_charging or not plugged_in or stored_epoch is None:
+    if known_charging or stored_epoch is None:
+        return False
+    if not (plugged_in or lock_changed):
         return False
     if already_polled_epoch is not None and stored_epoch <= already_polled_epoch:
         return False

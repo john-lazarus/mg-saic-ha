@@ -1045,8 +1045,8 @@ def compute_charge_session(
     energy_soc = None
     if start.soc_pct is not None and end.soc_pct is not None:
         soc_added = round(end.soc_pct - start.soc_pct, 1)
-        result["soc_start_pct"] = start.soc_pct
-        result["soc_end_pct"] = end.soc_pct
+        result["soc_start_pct"] = round(start.soc_pct, 1)
+        result["soc_end_pct"] = round(end.soc_pct, 1)
         result["soc_added_pct"] = soc_added
         if soc_added >= MIN_CHARGE_SOC_PCT and capacity_kwh:
             energy_soc = round(soc_added / 100.0 * capacity_kwh, 3)
@@ -1107,6 +1107,13 @@ MIN_UNSEEN_CHARGE_SOC_PCT = 1.0
 # ...or this much when the car keeps no record of its last charge to confirm
 # that one ended in between.
 MIN_UNSEEN_CHARGE_SOC_PCT_NO_RECORD = 2.0
+# The car's record of a charge no poll saw is only taken as its duration when
+# the energy over it comes to no more than this: above it, the record must
+# be just the last stretch of a longer charge. @HarryFlatter's HS, 11 Oct: a
+# 4-minute record for 6.7 kWh (about 100 kW) -- the last stretch of a
+# 1 h 47 min charge. @paulfcarney-ship-it's HS, 12 Oct: 5 h 46 min for
+# 11.8 kWh (2 kW on a granny charger) -- the whole charge.
+MAX_UNSEEN_RECORD_POWER_KW = 22.0
 
 
 def _reading_differs(a: "ChargeSnapshot | None", b: "ChargeSnapshot | None") -> bool:
@@ -1144,10 +1151,13 @@ def reconstruct_unseen_charge(
     Nothing had seen it charging, so no charge was recorded at all.
 
     The car's own record is the evidence that a charge ended in between: its
-    end moved, and the new end lies between the two readings. That record
-    only covers the last stretch of the charge (02:13-02:17 that night), so
-    it gives the end, not the start, and no duration is claimed. The energy
-    comes from the battery's rise, as for any charge.
+    end moved, and the new end lies between the two readings. The record
+    restarts whenever charging restarts, so it may cover only the last
+    stretch (02:13-02:17 that night). It is used as the duration only when
+    it starts after the first reading and the energy over it is a believable
+    charging rate (MAX_UNSEEN_RECORD_POWER_KW); even then it may miss an
+    earlier stretch, so it is marked car_partial and no average power is
+    given. The energy comes from the battery's rise, as for any charge.
     """
     if before is None or after is None:
         return None
@@ -1167,6 +1177,7 @@ def reconstruct_unseen_charge(
     ):
         return None  # driven in between: not a charge on its own
     rise = round(after.soc_pct - before.soc_pct, 1)
+    rec_start = getattr(after, "record_start", None)
     rec_end = getattr(after, "record_end", None)
     if rec_end:
         if rec_end == getattr(before, "record_end", None):
@@ -1183,8 +1194,8 @@ def reconstruct_unseen_charge(
         "end_ts": after.ts,
         "reconstructed": True,
         "duration_source": "not_seen",
-        "soc_start_pct": before.soc_pct,
-        "soc_end_pct": after.soc_pct,
+        "soc_start_pct": round(before.soc_pct, 1),
+        "soc_end_pct": round(after.soc_pct, 1),
         "soc_added_pct": rise,
     }
     if rec_end:
@@ -1204,6 +1215,15 @@ def reconstruct_unseen_charge(
     result["energy_added_kWh"] = (
         energy_soc if energy_soc is not None else energy_counter
     )
+    if rec_start and rec_end and seen_before <= rec_start < rec_end:
+        span_s = rec_end - rec_start
+        rate_kw = result["energy_added_kWh"] / (span_s / 3600.0)
+        if span_s <= CAR_RECORD_MAX_DURATION_S and rate_kw <= MAX_UNSEEN_RECORD_POWER_KW:
+            result["duration_s"] = int(span_s)
+            result["duration_source"] = "car_partial"
+            result["charge_start_ts"] = datetime.fromtimestamp(
+                rec_start, timezone.utc
+            ).isoformat()
     result["method"] = "soc" if energy_soc is not None else "counter"
     if energy_soc is not None:
         result["energy_added_kWh_soc"] = energy_soc
