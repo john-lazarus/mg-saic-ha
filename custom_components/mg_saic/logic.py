@@ -186,7 +186,7 @@ def odometer_km(basic_status, charging_data, *, factor, saturation):
 ELECTRIC_RANGE_SENTINEL = -128
 
 
-def electric_range_km(basic_status, charging_data, *, factor, prefer_basic=False):
+def electric_range_km(basic_status, charging_data, *, factor):
     """Remaining electric range in km, or None.
 
     Prefers the charging block's figure and falls back to basicVehicleStatus,
@@ -194,10 +194,6 @@ def electric_range_km(basic_status, charging_data, *, factor, prefer_basic=False
     sentinel; 0 is allowed through, since a flat pack really does have no
     range left.
     """
-    if prefer_basic:
-        raw = getattr(basic_status, "fuelRangeElec", None) if basic_status else None
-        if raw is not None and raw > 0 and raw != ELECTRIC_RANGE_SENTINEL:
-            return round(raw * factor, 1)
     rcs = getattr(charging_data, "rvsChargeStatus", None) if charging_data else None
     for source in (rcs, basic_status):
         if source is None:
@@ -467,9 +463,9 @@ class ChargingFreshnessTracker:
         self.last_error = None
         self._last_attempt_ok = None
 
-    def record_success(self, now, *, source_time=None):
-        """Record receipt separately from an independently measured source time."""
-        self.last_success = source_time if source_time is not None else now
+    def record_success(self, now):
+        """The charging endpoint returned usable data at ``now``."""
+        self.last_success = now
         self.last_attempt = now
         self.stale_since = None
         self.consecutive_failures = 0

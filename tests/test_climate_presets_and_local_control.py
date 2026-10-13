@@ -80,11 +80,6 @@ def _load_climate():
     components.__path__ = []
     helpers = _module("homeassistant.helpers")
     helpers.__path__ = []
-    if "homeassistant.exceptions" not in sys.modules:
-        _module(
-            "homeassistant.exceptions",
-            HomeAssistantError=type("HomeAssistantError", (Exception,), {}),
-        )
 
     class _ClimateEntity:
         _attr_supported_features = 0
@@ -155,7 +150,6 @@ def _load_climate():
 
 
 CLIMATE = _load_climate()
-HomeAssistantError = sys.modules["homeassistant.exceptions"].HomeAssistantError
 
 
 def _run(coro):
@@ -259,16 +253,14 @@ class LocalControlTests(_Base):
 
     def test_command_is_not_sent_and_the_reason_is_explained(self):
         entity = self._entity(status=6)
-        with self.assertRaises(HomeAssistantError):
-            _run(entity.async_set_hvac_mode(_HVACMode.COOL))
+        _run(entity.async_set_hvac_mode(_HVACMode.COOL))
         entity.coordinator.notify_climate_local_control.assert_awaited_once()
         entity._client.start_climate.assert_not_awaited()
         entity._client.start_ac.assert_not_awaited()
 
     def test_preset_is_not_sent_under_local_control_either(self):
         entity = self._entity(status=6)
-        with self.assertRaises(HomeAssistantError):
-            _run(entity.async_set_preset_mode(CLIMATE.PRESET_LOW))
+        _run(entity.async_set_preset_mode(CLIMATE.PRESET_LOW))
         entity.coordinator.notify_climate_local_control.assert_awaited_once()
         entity._client.start_climate.assert_not_awaited()
 

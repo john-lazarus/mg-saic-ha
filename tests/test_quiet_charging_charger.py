@@ -38,8 +38,6 @@ def _event(old, new):
 def _coordinator(charger_state="Charging", *, entity=ZAPPI, charging=False):
     c = COORD_CLS.__new__(COORD_CLS)
     c.vin = "TESTVIN"
-    c.vehicle_type = "PHEV"
-    c.client = NS(get_cached_vehicle_status=AsyncMock(return_value=None))
     c.quiet_hours = True
     c.live_polling = False
     c.quiet_hours_start = time(0, 0)

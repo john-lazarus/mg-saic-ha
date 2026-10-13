@@ -245,7 +245,6 @@ class StoredRewriteTests(unittest.TestCase):
 def _coordinator(*, flag=0, taken=LAST_LIVE + 3600, charging=False, read_error=None):
     c = COORD_CLS.__new__(COORD_CLS)
     c.vin = "TESTVIN"
-    c.vehicle_type = "PHEV"
     c.quiet_hours = True
     c.live_polling = False
     c.quiet_hours_start = time(22, 0)

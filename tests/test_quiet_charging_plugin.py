@@ -48,7 +48,6 @@ def _stored(lock, taken=COPY_AT_PLUG_IN, flag=0):
 def _coordinator(copy_lock, *, live_lock=1, gun=0, soc_tenths=493):
     c = COORD_CLS.__new__(COORD_CLS)
     c.vin = "TESTVIN"
-    c.vehicle_type = "PHEV"
     c.quiet_hours = True
     c.live_polling = False
     c.quiet_hours_start = datetime(2026, 1, 1, 19, 0).time()

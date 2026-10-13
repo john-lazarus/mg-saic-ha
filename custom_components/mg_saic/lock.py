@@ -1,7 +1,5 @@
 # File: lock.py
 
-from homeassistant.exceptions import HomeAssistantError
-
 from homeassistant.components.lock import LockEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .api import CommandsLimitReachedException, VehicleNotLockedException
@@ -84,14 +82,11 @@ class SAICMGLockEntity(CoordinatorEntity, LockEntity):
             )
         except CommandsLimitReachedException:
             await self.coordinator.notify_command_limit_reached(self._vin)
-            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
         except VehicleNotLockedException:
             await self.coordinator.notify_vehicle_not_locked(self._vin)
-            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
         except Exception as e:
             LOGGER.error("Error locking vehicle for VIN %s: %s", self._vin, e)
             self.coordinator.record_command_error("Error locking vehicle", e)
-            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
 
     async def async_unlock(self, **kwargs):
         """Unlock the vehicle."""
@@ -108,11 +103,8 @@ class SAICMGLockEntity(CoordinatorEntity, LockEntity):
             )
         except CommandsLimitReachedException:
             await self.coordinator.notify_command_limit_reached(self._vin)
-            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
         except VehicleNotLockedException:
             await self.coordinator.notify_vehicle_not_locked(self._vin)
-            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
         except Exception as e:
             LOGGER.error("Error unlocking vehicle for VIN %s: %s", self._vin, e)
             self.coordinator.record_command_error("Error unlocking vehicle", e)
-            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
