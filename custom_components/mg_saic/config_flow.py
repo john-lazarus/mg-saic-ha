@@ -52,6 +52,7 @@ from .const import (
     UPDATE_INTERVAL_POWERED,
 )
 from .quiet_hours import (
+    CONF_QUIET_CHARGER_ENTITY,
     CONF_QUIET_HOURS,
     CONF_QUIET_HOURS_END,
     CONF_QUIET_HOURS_LIVE_POLLING,
@@ -103,6 +104,22 @@ try:  # pragma: no cover - exercised at runtime, shimmed under tests
     )
 except Exception:  # noqa: BLE001 - any import failure means "no selector here"
     PASSWORD_SELECTOR = str
+
+
+# The charger status picker for Quiet charging: Home Assistant's own
+# searchable entity drop-down, sensors and binary sensors only. Typing or
+# pasting an entity id into it works too. Plain text under the test harness.
+try:  # pragma: no cover - exercised at runtime, shimmed under tests
+    from homeassistant.helpers.selector import (
+        EntitySelector,
+        EntitySelectorConfig,
+    )
+
+    CHARGER_ENTITY_SELECTOR = EntitySelector(
+        EntitySelectorConfig(domain=["sensor", "binary_sensor"])
+    )
+except Exception:  # noqa: BLE001 - any import failure means "no selector here"
+    CHARGER_ENTITY_SELECTOR = str
 
 
 class NoVehiclesFoundError(Exception):
@@ -626,6 +643,9 @@ class SAICMGOptionsFlowHandler(config_entries.OptionsFlow):
             errors = await self._validate_abrp(user_input)
             _normalise_capacity(user_input, errors)
             _normalise_tank(user_input, errors)
+            # Cleared picker: no charger entity.
+            if not user_input.get(CONF_QUIET_CHARGER_ENTITY):
+                user_input.pop(CONF_QUIET_CHARGER_ENTITY, None)
             if not errors:
                 # Settings the device's own controls keep in the options
                 # (Holiday Mode, the quiet hours times) are not on this form,
@@ -747,6 +767,14 @@ class SAICMGOptionsFlowHandler(config_entries.OptionsFlow):
                     CONF_QUIET_HOURS,
                     default=self.options.get(CONF_QUIET_HOURS, False),
                 ): bool,
+                # Optional charger status entity for Quiet charging. A
+                # suggested value, not a default, so it can be cleared.
+                vol.Optional(
+                    CONF_QUIET_CHARGER_ENTITY,
+                    description={
+                        "suggested_value": self.options.get(CONF_QUIET_CHARGER_ENTITY)
+                    },
+                ): CHARGER_ENTITY_SELECTOR,
                 # Update Intervals in minutes
                 vol.Optional(
                     "update_interval",

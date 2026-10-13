@@ -120,6 +120,16 @@ They only go unavailable if the car has never answered the charging request sinc
 
 To stop using it altogether, untick **Quiet charging** in Configure: the three controls go and polling is normal all the time. The switch only overrides the times for now.
 
+**Using your charger (recommended)** *(from 1.4.0-beta7)*: in Configure, **Quiet charging: charger status** lets you pick your charger's status sensor from the usual searchable list (sensors and binary sensors; you can also type or paste an entity ID). A zappi, Ohme or Pod Point status sensor works as it is: it counts as charging when it reads `on` or `charging`, in any capitalisation. For anything else, make a template binary sensor that is on while charging and pick that.
+
+The car never tells SAIC when it starts charging, and on an MG HS PHEV every live poll during a charge turns the lights on. With a charger picked:
+
+- **The charger starts charging:** one live poll straight away. The car turns its lights on by itself at the start of a charge, so this poll adds no flash of its own.
+- **The charger stops,** and is still stopped 2 minutes later: one live poll, after the car has stopped, so no flash, and an exact finish. A pause shorter than 2 minutes (a zappi's one-minute "Waiting for EV") costs nothing.
+- **The predicted "has it finished?" check** is held back while the charger still says charging.
+- **SAIC's stored status** is then only a fallback, used while the charger's entity is unavailable.
+- A charger coming back from unavailable, or Home Assistant restarting, mid-charge doesn't count as a start, so it doesn't cost a poll.
+
 **While Quiet Charging is on and the car is switched off:**
 
 - Scheduled polls read the stored status at your normal idle interval (or the Holiday Mode one), never faster, even while charging.

@@ -1047,6 +1047,11 @@ class SAICMGQuietChargingSwitch(CoordinatorEntity, SwitchEntity):
             "quiet_charging_start": f"{c.quiet_hours_start:%H:%M}",
             "quiet_charging_end": f"{c.quiet_hours_end:%H:%M}",
         }
+        charger = getattr(c, "quiet_charger_entity", None)
+        if charger:
+            attrs["charger_entity"] = charger
+            charging = c._charger_charging() if hasattr(c, "_charger_charging") else None
+            attrs["charger_says_charging"] = charging
         due = getattr(c, "quiet_finish_check_at", None)
         if due is not None:
             attrs["charge_finish_check_at"] = due.isoformat()
