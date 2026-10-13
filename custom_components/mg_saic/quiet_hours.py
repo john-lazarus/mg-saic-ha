@@ -64,8 +64,13 @@ DEFAULT_QUIET_HOURS_START = time(hour=22, minute=0)
 DEFAULT_QUIET_HOURS_END = time(hour=7, minute=0)
 
 # Added to the expected finish so the check lands after the charge, not on
-# its last minutes (when an HS would still be charging, and flashing).
-FINISH_CHECK_MARGIN = timedelta(minutes=15)
+# its last minutes (when an HS would still be charging, and flashing): this,
+# or FINISH_CHECK_MARGIN_SHARE of the time remaining if that is longer. The
+# car's own estimate runs short: @HarryFlatter's HS, 13 Oct, said 39 minutes
+# to go at 00:39 and finished at 01:38, 20 minutes late, after a zappi pause
+# and the slow last few %. With 15 minutes the check found it still charging.
+FINISH_CHECK_MARGIN = timedelta(minutes=30)
+FINISH_CHECK_MARGIN_SHARE = 0.25
 # Never sooner than this after the poll that worked it out.
 FINISH_CHECK_MIN = timedelta(minutes=15)
 # When nothing says how long the charge will take.
@@ -310,4 +315,5 @@ def finish_check_delay(remaining: Optional[timedelta]) -> timedelta:
     """How long to wait before the "has it finished?" poll."""
     if remaining is None:
         return FINISH_CHECK_FALLBACK
-    return max(remaining + FINISH_CHECK_MARGIN, FINISH_CHECK_MIN)
+    margin = max(FINISH_CHECK_MARGIN, remaining * FINISH_CHECK_MARGIN_SHARE)
+    return max(remaining + margin, FINISH_CHECK_MIN)
