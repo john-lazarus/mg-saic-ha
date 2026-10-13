@@ -1,7 +1,5 @@
 # File: switch.py
 
-from homeassistant.exceptions import HomeAssistantError
-
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.components.climate import HVACMode
 from homeassistant.helpers.entity import EntityCategory
@@ -269,14 +267,11 @@ class SAICMGBatteryHeatingSwitch(CoordinatorEntity, SwitchEntity):
             )
         except CommandsLimitReachedException:
             await self.coordinator.notify_command_limit_reached(self._vin)
-            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
         except VehicleNotLockedException:
             await self.coordinator.notify_vehicle_not_locked(self._vin)
-            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
         except Exception as e:
             LOGGER.error("Error starting battery heating for VIN %s: %s", self._vin, e)
             self.coordinator.record_command_error("Error starting battery heating", e)
-            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
 
     async def async_turn_off(self, **kwargs):
         """Stop battery heating."""
@@ -286,14 +281,11 @@ class SAICMGBatteryHeatingSwitch(CoordinatorEntity, SwitchEntity):
             await self.coordinator.async_request_refresh()
         except CommandsLimitReachedException:
             await self.coordinator.notify_command_limit_reached(self._vin)
-            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
         except VehicleNotLockedException:
             await self.coordinator.notify_vehicle_not_locked(self._vin)
-            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
         except Exception as e:
             LOGGER.error("Error stopping battery heating for VIN %s: %s", self._vin, e)
             self.coordinator.record_command_error("Error stopping battery heating", e)
-            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
 
 
 class SAICMGBatteryHeatingScheduleSwitch(CoordinatorEntity, SwitchEntity):
@@ -365,10 +357,8 @@ class SAICMGBatteryHeatingScheduleSwitch(CoordinatorEntity, SwitchEntity):
             await self.coordinator.async_request_refresh()
         except CommandsLimitReachedException:
             await self.coordinator.notify_command_limit_reached(self._vin)
-            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
         except VehicleNotLockedException:
             await self.coordinator.notify_vehicle_not_locked(self._vin)
-            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
         except Exception as e:
             LOGGER.error(
                 "Error enabling battery heating schedule for VIN %s: %s", self._vin, e
@@ -376,7 +366,6 @@ class SAICMGBatteryHeatingScheduleSwitch(CoordinatorEntity, SwitchEntity):
             self.coordinator.record_command_error(
                 "Error enabling battery heating schedule", e
             )
-            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
 
     async def async_turn_off(self, **kwargs):
         """Disable the battery heating schedule."""
@@ -388,10 +377,8 @@ class SAICMGBatteryHeatingScheduleSwitch(CoordinatorEntity, SwitchEntity):
             await self.coordinator.async_request_refresh()
         except CommandsLimitReachedException:
             await self.coordinator.notify_command_limit_reached(self._vin)
-            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
         except VehicleNotLockedException:
             await self.coordinator.notify_vehicle_not_locked(self._vin)
-            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
         except Exception as e:
             LOGGER.error(
                 "Error disabling battery heating schedule for VIN %s: %s", self._vin, e
@@ -399,7 +386,6 @@ class SAICMGBatteryHeatingScheduleSwitch(CoordinatorEntity, SwitchEntity):
             self.coordinator.record_command_error(
                 "Error disabling battery heating schedule", e
             )
-            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
 
 
 class SAICMGChargingPortLockSwitch(CoordinatorEntity, SwitchEntity):
@@ -449,14 +435,11 @@ class SAICMGChargingPortLockSwitch(CoordinatorEntity, SwitchEntity):
             )
         except CommandsLimitReachedException:
             await self.coordinator.notify_command_limit_reached(self._vin)
-            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
         except VehicleNotLockedException:
             await self.coordinator.notify_vehicle_not_locked(self._vin)
-            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
         except Exception as e:
             LOGGER.error("Error locking charging port for VIN %s: %s", self._vin, e)
             self.coordinator.record_command_error("Error locking charging port", e)
-            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
 
     async def async_turn_off(self, **kwargs):
         """Unlock the charging port."""
@@ -466,14 +449,11 @@ class SAICMGChargingPortLockSwitch(CoordinatorEntity, SwitchEntity):
             await self.coordinator.async_request_refresh()
         except CommandsLimitReachedException:
             await self.coordinator.notify_command_limit_reached(self._vin)
-            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
         except VehicleNotLockedException:
             await self.coordinator.notify_vehicle_not_locked(self._vin)
-            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
         except Exception as e:
             LOGGER.error("Error unlocking charging port for VIN %s: %s", self._vin, e)
             self.coordinator.record_command_error("Error unlocking charging port", e)
-            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
 
 
 class SAICMGChargingSwitch(CoordinatorEntity, SwitchEntity):
@@ -536,14 +516,11 @@ class SAICMGChargingSwitch(CoordinatorEntity, SwitchEntity):
             )
         except CommandsLimitReachedException:
             await self.coordinator.notify_command_limit_reached(self._vin)
-            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
         except VehicleNotLockedException:
             await self.coordinator.notify_vehicle_not_locked(self._vin)
-            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
         except Exception as e:
             LOGGER.error("Error starting charging for VIN %s: %s", self._vin, e)
             self.coordinator.record_command_error("Error starting charging", e)
-            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
 
     async def async_turn_off(self, **kwargs):
         """Stop charging."""
@@ -553,14 +530,11 @@ class SAICMGChargingSwitch(CoordinatorEntity, SwitchEntity):
             await self.coordinator.async_request_refresh()
         except CommandsLimitReachedException:
             await self.coordinator.notify_command_limit_reached(self._vin)
-            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
         except VehicleNotLockedException:
             await self.coordinator.notify_vehicle_not_locked(self._vin)
-            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
         except Exception as e:
             LOGGER.error("Error stopping charging for VIN %s: %s", self._vin, e)
             self.coordinator.record_command_error("Error stopping charging", e)
-            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
 
 
 class SAICMGFrontDefrostSwitch(CoordinatorEntity, SwitchEntity):
@@ -613,7 +587,7 @@ class SAICMGFrontDefrostSwitch(CoordinatorEntity, SwitchEntity):
                 await self.coordinator.notify_front_defrost_blocked(
                     self._vin, "switch.front_defrost.turn_on"
                 )
-                raise HomeAssistantError("Front defrost requires climate to be off")
+                return
 
             immediate_interval = self.coordinator.after_action_delay
             long_interval = self.coordinator.front_defrost_long_interval
@@ -627,14 +601,11 @@ class SAICMGFrontDefrostSwitch(CoordinatorEntity, SwitchEntity):
             )
         except CommandsLimitReachedException:
             await self.coordinator.notify_command_limit_reached(self._vin)
-            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
         except VehicleNotLockedException:
             await self.coordinator.notify_vehicle_not_locked(self._vin)
-            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
         except Exception as e:
             LOGGER.error("Error starting front defrost for VIN %s: %s", self._vin, e)
             self.coordinator.record_command_error("Error starting front defrost", e)
-            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
 
     async def async_turn_off(self, **kwargs):
         """Stop front defrost by stopping the AC."""
@@ -644,14 +615,11 @@ class SAICMGFrontDefrostSwitch(CoordinatorEntity, SwitchEntity):
             await self.coordinator.async_request_refresh()
         except CommandsLimitReachedException:
             await self.coordinator.notify_command_limit_reached(self._vin)
-            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
         except VehicleNotLockedException:
             await self.coordinator.notify_vehicle_not_locked(self._vin)
-            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
         except Exception as e:
             LOGGER.error("Error stopping front defrost for VIN %s: %s", self._vin, e)
             self.coordinator.record_command_error("Error stopping front defrost", e)
-            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
 
 
 class SAICMGHeatedSeatSwitch(SAICMGVehicleSwitch):
@@ -734,17 +702,14 @@ class SAICMGHeatedSeatSwitch(SAICMGVehicleSwitch):
             )
         except CommandsLimitReachedException:
             await self.coordinator.notify_command_limit_reached(self._vin)
-            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
         except VehicleNotLockedException:
             await self.coordinator.notify_vehicle_not_locked(self._vin)
-            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
         except Exception as e:
             LOGGER.error(
                 "Error setting heated seat %s for VIN %s: %s",
                 self._seat_key, self._vin, e,
             )
             self.coordinator.record_command_error("Error controlling heated seat", e)
-            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
 
     async def async_turn_on(self, **kwargs):
         await self._apply(self._on_level())
@@ -820,16 +785,13 @@ class SAICMGSteeringWheelHeatSwitch(SAICMGVehicleSwitch):
             )
         except CommandsLimitReachedException:
             await self.coordinator.notify_command_limit_reached(self._vin)
-            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
         except VehicleNotLockedException:
             await self.coordinator.notify_vehicle_not_locked(self._vin)
-            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
         except Exception as e:
             LOGGER.error(
                 "Error turning on steering wheel heat for VIN %s: %s", self._vin, e
             )
             self.coordinator.record_command_error("Error steering wheel heat", e)
-            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
 
     async def async_turn_off(self, **kwargs):
         try:
@@ -838,16 +800,13 @@ class SAICMGSteeringWheelHeatSwitch(SAICMGVehicleSwitch):
             self.async_write_ha_state()
         except CommandsLimitReachedException:
             await self.coordinator.notify_command_limit_reached(self._vin)
-            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
         except VehicleNotLockedException:
             await self.coordinator.notify_vehicle_not_locked(self._vin)
-            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
         except Exception as e:
             LOGGER.error(
                 "Error turning off steering wheel heat for VIN %s: %s", self._vin, e
             )
             self.coordinator.record_command_error("Error steering wheel heat", e)
-            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
 
 
 class SAICMGRearWindowDefrostSwitch(CoordinatorEntity, SwitchEntity):
@@ -897,10 +856,8 @@ class SAICMGRearWindowDefrostSwitch(CoordinatorEntity, SwitchEntity):
             )
         except CommandsLimitReachedException:
             await self.coordinator.notify_command_limit_reached(self._vin)
-            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
         except VehicleNotLockedException:
             await self.coordinator.notify_vehicle_not_locked(self._vin)
-            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
         except Exception as e:
             LOGGER.error(
                 "Error turning on rear window defrost for VIN %s: %s", self._vin, e
@@ -908,7 +865,6 @@ class SAICMGRearWindowDefrostSwitch(CoordinatorEntity, SwitchEntity):
             self.coordinator.record_command_error(
                 "Error turning on rear window defrost", e
             )
-            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
 
     async def async_turn_off(self, **kwargs):
         """Turn the rear window defrost off."""
@@ -918,10 +874,8 @@ class SAICMGRearWindowDefrostSwitch(CoordinatorEntity, SwitchEntity):
             await self.coordinator.async_request_refresh()
         except CommandsLimitReachedException:
             await self.coordinator.notify_command_limit_reached(self._vin)
-            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
         except VehicleNotLockedException:
             await self.coordinator.notify_vehicle_not_locked(self._vin)
-            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
         except Exception as e:
             LOGGER.error(
                 "Error turning off rear window defrost for VIN %s: %s", self._vin, e
@@ -929,7 +883,6 @@ class SAICMGRearWindowDefrostSwitch(CoordinatorEntity, SwitchEntity):
             self.coordinator.record_command_error(
                 "Error turning off rear window defrost", e
             )
-            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
 
 
 class SAICMGSunroofSwitch(CoordinatorEntity, SwitchEntity):
@@ -975,14 +928,11 @@ class SAICMGSunroofSwitch(CoordinatorEntity, SwitchEntity):
             )
         except CommandsLimitReachedException:
             await self.coordinator.notify_command_limit_reached(self._vin)
-            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
         except VehicleNotLockedException:
             await self.coordinator.notify_vehicle_not_locked(self._vin)
-            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
         except Exception as e:
             LOGGER.error("Error opening sunroof for VIN %s: %s", self._vin, e)
             self.coordinator.record_command_error("Error opening sunroof", e)
-            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
 
     async def async_turn_off(self, **kwargs):
         """Close the sunroof."""
@@ -992,14 +942,11 @@ class SAICMGSunroofSwitch(CoordinatorEntity, SwitchEntity):
             await self.coordinator.async_request_refresh()
         except CommandsLimitReachedException:
             await self.coordinator.notify_command_limit_reached(self._vin)
-            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
         except VehicleNotLockedException:
             await self.coordinator.notify_vehicle_not_locked(self._vin)
-            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
         except Exception as e:
             LOGGER.error("Error closing sunroof for VIN %s: %s", self._vin, e)
             self.coordinator.record_command_error("Error closing sunroof", e)
-            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
 
 
 class SAICMGHolidayModeSwitch(CoordinatorEntity, SwitchEntity):
@@ -1184,8 +1131,7 @@ class SAICMGACSwitch(CoordinatorEntity, SwitchEntity):
         climate = self.coordinator.climate_entity
         if climate is None:
             LOGGER.warning("Climate entity not ready; cannot turn the A/C on.")
-            self.coordinator.record_command_error("A/C turn on unavailable", "Climate entity not ready")
-            raise HomeAssistantError("Climate entity not ready") from None
+            return
         await climate.async_turn_on()
         self.coordinator.async_update_listeners()
 
@@ -1194,7 +1140,6 @@ class SAICMGACSwitch(CoordinatorEntity, SwitchEntity):
         climate = self.coordinator.climate_entity
         if climate is None:
             LOGGER.warning("Climate entity not ready; cannot turn the A/C off.")
-            self.coordinator.record_command_error("A/C turn off unavailable", "Climate entity not ready")
-            raise HomeAssistantError("Climate entity not ready") from None
+            return
         await climate.async_set_hvac_mode(HVACMode.OFF)
         self.coordinator.async_update_listeners()

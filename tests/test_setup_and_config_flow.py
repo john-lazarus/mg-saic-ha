@@ -93,16 +93,6 @@ def _install_stubs():
     ce.ConfigEntryAuthFailed = _ConfigEntryAuthFailed
     sys.modules["homeassistant.config_entries"] = ce
 
-    exceptions = types.ModuleType("homeassistant.exceptions")
-    exceptions.HomeAssistantError = type("HomeAssistantError", (Exception,), {})
-    exceptions.ConfigEntryError = type(
-        "ConfigEntryError", (exceptions.HomeAssistantError,), {}
-    )
-    exceptions.ServiceValidationError = type(
-        "ServiceValidationError", (exceptions.HomeAssistantError,), {}
-    )
-    sys.modules["homeassistant.exceptions"] = exceptions
-
     # Real (non-MagicMock) saic exceptions module: __init__ imports
     # SaicLogoutException and uses it in isinstance() checks, which requires a
     # genuine class rather than a MagicMock attribute.
@@ -154,12 +144,7 @@ def _install_stubs():
 
     vol.Required = _Marker
     vol.Optional = _Marker
-    class _Schema(dict):
-        @property
-        def schema(self):
-            return self
-
-    vol.Schema = _Schema
+    vol.Schema = lambda d, **kw: d
     vol.In = lambda x: x
     vol.All = lambda *a: a
     vol.Any = lambda *a: a
@@ -198,14 +183,12 @@ _load("mg_saic.message_poller", PKG_DIR / "message_poller.py", force=True)
 _load("mg_saic.services", PKG_DIR / "services.py", force=True)
 CF = _load("mg_saic.config_flow", PKG_DIR / "config_flow.py", force=True)
 SETUP = _load("mg_saic.setup_module", PKG_DIR / "__init__.py")
-sys.modules["mg_saic"]._account_key = SETUP._account_key
 
 
 
 class _FakeHass:
     def __init__(self):
         self.data = {}
-        self.config_entries = SimpleNamespace(async_entries=lambda _domain: [])
 
 
 class _FakeEntry:
@@ -843,7 +826,6 @@ class CapacityFreshnessDuringAPollTests(unittest.TestCase):
         mod = sys.modules["mg_saic.coordinator"]
         c = mod.SAICMGDataUpdateCoordinator.__new__(mod.SAICMGDataUpdateCoordinator)
         c.vin = "TESTVIN"
-        c.client = SimpleNamespace(region_name="EU")
         c.vehicle_type = "BEV"
         c.is_charging = False
         c.is_powered_on = False
@@ -1497,8 +1479,6 @@ class TestNoVehiclesSetupMessage(unittest.TestCase):
         flow._existing_entry = _FakeEntry(
             {"login_type": "email", "username": "driver@example.com", "region": "EU"}
         )
-        flow.hass.data = {}
-        flow.hass.config_entries.async_entries.return_value = [flow._existing_entry]
 
         async def _fetch(*a, **k):
             raise CF.NoVehiclesFoundError("Vehicle list API returned no vehicles")

@@ -1,7 +1,5 @@
 # File: button.py
 
-from homeassistant.exceptions import HomeAssistantError
-
 import asyncio
 from homeassistant.components.button import ButtonEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -113,14 +111,11 @@ class SAICMGTriggerAlarmButton(CoordinatorEntity, ButtonEntity):
             )
         except CommandsLimitReachedException:
             await self.coordinator.notify_command_limit_reached(self._vin)
-            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
         except VehicleNotLockedException:
             await self.coordinator.notify_vehicle_not_locked(self._vin)
-            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
         except Exception as e:
             LOGGER.error("Error triggering alarm for VIN %s: %s", self._vin, e)
             self.coordinator.record_command_error("Error triggering alarm", e)
-            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
 
     @property
     def device_info(self):
@@ -152,7 +147,6 @@ class SAICMGUpdateDataButton(CoordinatorEntity, ButtonEntity):
         except Exception as e:
             LOGGER.error("Error triggering data update for VIN %s: %s", self._vin, e)
             self.coordinator.record_command_error("Error triggering data update", e)
-            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
 
     @property
     def device_info(self):
@@ -200,14 +194,11 @@ class SAICMGOpenBootButton(CoordinatorEntity, ButtonEntity):
             )
         except CommandsLimitReachedException:
             await self.coordinator.notify_command_limit_reached(self._vin)
-            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
         except VehicleNotLockedException:
             await self.coordinator.notify_vehicle_not_locked(self._vin)
-            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
         except Exception as e:
             LOGGER.error("Error opening boot for VIN %s: %s", self._vin, e)
             self.coordinator.record_command_error("Error opening boot", e)
-            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
 
 
 class SAICMGWindowButtonBase(CoordinatorEntity, ButtonEntity):
@@ -267,10 +258,8 @@ class SAICMGWindowButtonBase(CoordinatorEntity, ButtonEntity):
             )
         except CommandsLimitReachedException:
             await self.coordinator.notify_command_limit_reached(self._vin)
-            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
         except VehicleNotLockedException:
             await self.coordinator.notify_vehicle_not_locked(self._vin)
-            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
         except Exception as e:
             LOGGER.error(
                 "Error sending windows %s for VIN %s: %s",
@@ -281,7 +270,6 @@ class SAICMGWindowButtonBase(CoordinatorEntity, ButtonEntity):
             self.coordinator.record_command_error(
                 f"Error controlling windows ({self._window_action})", e
             )
-            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
 
 
 class SAICMGVentilateWindowsButton(SAICMGWindowButtonBase):

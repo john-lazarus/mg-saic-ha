@@ -1,6 +1,5 @@
 # File: config_flow.py
 
-import asyncio
 import logging
 from contextlib import suppress
 
@@ -500,111 +499,37 @@ class SAICMGConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return await self.async_step_reauth_confirm()
 
     async def async_step_reauth_confirm(self, user_input=None):
-        """Validate new credentials and replace the shared account session."""
+        """Ask for the new password, validate it, and update the entry."""
         errors = {}
         if user_input is not None:
-            from . import _account_key
+            # Same whitespace guard as the initial login (issue #250).
             self.password = user_input["password"].strip()
-            acct_key = _account_key(self._existing_entry)
-            siblings = [
-                e for e in self.hass.config_entries.async_entries(DOMAIN)
-                if _account_key(e) == acct_key
-            ]
-            domain = self.hass.data.setdefault(DOMAIN, {})
-            login_lock = domain.setdefault("account_login_locks", {}).setdefault(acct_key, asyncio.Lock())
-            api_lock = domain.setdefault("account_locks", {}).setdefault(acct_key, asyncio.Lock())
-            progress = domain.setdefault("setups_in_progress", set())
-            sibling_ids = {e.entry_id for e in siblings}
-            if sibling_ids & progress:
+            try:
+                username_is_email = self.login_type == "email"
+                if self.region == REGION_INDIA:
+                    await self.fetch_vehicle_data_india()
+                else:
+                    await self.fetch_vehicle_data(username_is_email)
+            except NoVehiclesFoundError as e:  # noqa: BLE001 - surfaced as a form error
+                errors["base"] = "no_vehicles"
+                LOGGER.warning(
+                    "Re-authentication succeeded but the account has no vehicles: %s",
+                    e,
+                )
+            except Exception as e:  # noqa: BLE001 - surfaced as a form error
                 errors["base"] = "auth"
+                LOGGER.error("Re-authentication failed: %s", e)
             else:
-                # Reuse the setup guard until all owners have unloaded and the
-                # old shared session has closed. No sibling can set up mid-replacement.
-                progress.update(sibling_ids)
-                updated = False
-                unloaded = []
-                cancellation = None
-                try:
-                    async with login_lock:
-                        async with api_lock:
-                            if self.region == REGION_INDIA:
-                                await self.fetch_vehicle_data_india()
-                            else:
-                                await self.fetch_vehicle_data(self.login_type == "email")
-                    for sibling in siblings:
-                        if sibling.entry_id in domain:
-                            if not await self.hass.config_entries.async_unload(sibling.entry_id):
-                                raise ValueError("Could not unload all account entries")
-                            unloaded.append(sibling)
-                    async with login_lock:
-                        poller = domain.get("account_pollers", {}).pop(acct_key, None)
-                        if poller is not None:
-                            await poller.async_stop()
-                        async with api_lock:
-                            shared_client = domain.get("account_clients", {}).pop(acct_key, None)
-                            if shared_client is not None:
-                                close_task = asyncio.create_task(shared_client.close())
-                                try:
-                                    await asyncio.shield(close_task)
-                                except BaseException:
-                                    while not close_task.done():
-                                        with suppress(Exception, asyncio.CancelledError):
-                                            await asyncio.shield(close_task)
-                                    with suppress(Exception, asyncio.CancelledError):
-                                        close_task.result()
-                                    raise
-                            for sibling in siblings:
-                                self.hass.config_entries.async_update_entry(
-                                    sibling, data={**sibling.data, "password": self.password}
-                                )
-                            updated = True
-                except asyncio.CancelledError as err:
-                    cancellation = err
-                    raise
-                except NoVehiclesFoundError:
-                    errors["base"] = "no_vehicles"
-                except Exception as err:
-                    errors["base"] = "auth"
-                    LOGGER.debug("Account reauthentication failed", exc_info=err)
-                finally:
-                    progress.difference_update(sibling_ids)
-                    # One attempt per entry after the guard clears, with the
-                    # committed credentials or, on failure, the original ones.
-                    # Finish every attempt; cancellation takes precedence over
-                    # ordinary failures, including before credentials commit.
-                    reload_error = None
-                    for sibling in siblings if updated else unloaded:
-                        reload_task = asyncio.create_task(
-                            self.hass.config_entries.async_reload(sibling.entry_id)
-                        )
-                        while not reload_task.done():
-                            try:
-                                await asyncio.shield(reload_task)
-                            except asyncio.CancelledError as err:
-                                if cancellation is None:
-                                    cancellation = err
-                            except Exception:
-                                break
-                        try:
-                            if not reload_task.result():
-                                raise ValueError("Account entry recovery did not complete")
-                        except asyncio.CancelledError as err:
-                            if cancellation is None:
-                                cancellation = err
-                        except Exception as err:
-                            LOGGER.warning("Account entry recovery failed")
-                            if reload_error is None:
-                                reload_error = err
-                    if cancellation is not None:
-                        raise cancellation
-                    if updated and reload_error is not None:
-                        raise reload_error
-                if updated:
-                    return self.async_abort(reason="reauth_successful")
+                return self.async_update_reload_and_abort(
+                    self._existing_entry,
+                    data={**self._existing_entry.data, "password": self.password},
+                )
 
         return self.async_show_form(
             step_id="reauth_confirm",
-            data_schema=vol.Schema({vol.Required("password"): PASSWORD_SELECTOR}),
+            data_schema=vol.Schema(
+                {vol.Required("password"): PASSWORD_SELECTOR}
+            ),
             description_placeholders={"username": self.username or ""},
             errors=errors,
         )
@@ -666,15 +591,6 @@ class SAICMGConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         except Exception as e:
             LOGGER.error("Error fetching vehicle data: %s", e)
             raise
-        finally:
-            # This validation client has no account owner. Finish cleanup
-            # without replacing the validation result or original exception.
-            close_task = asyncio.create_task(saic_api.close())
-            while not close_task.done():
-                with suppress(Exception, asyncio.CancelledError):
-                    await asyncio.shield(close_task)
-            with suppress(Exception, asyncio.CancelledError):
-                close_task.result()
 
     @staticmethod
     @callback
@@ -739,11 +655,6 @@ class SAICMGOptionsFlowHandler(config_entries.OptionsFlow):
                 for key in RUNTIME_OPTION_KEYS:
                     if key in self.config_entry.options and key not in user_input:
                         user_input[key] = self.config_entry.options[key]
-                if self.config_entry.data.get("region") == REGION_INDIA:
-                    for key in (CONF_QUIET_HOURS, CONF_QUIET_CHARGER_ENTITY,
-                                CONF_QUIET_HOURS_START, CONF_QUIET_HOURS_END,
-                                CONF_QUIET_HOURS_LIVE_POLLING, CONF_QUIET_HOURS_LIVE_POLLING_AT):
-                        user_input.pop(key, None)
                 return self.async_create_entry(title="", data=user_input)
 
         # On first render use the saved options; on a validation error re-render
@@ -1027,12 +938,6 @@ class SAICMGOptionsFlowHandler(config_entries.OptionsFlow):
                 ): vol.All(vol.Coerce(int), vol.Range(min=1)),
             }
         )
-
-        if self.config_entry.data.get("region") == REGION_INDIA:
-            data_schema = vol.Schema({
-                key: value for key, value in data_schema.schema.items()
-                if getattr(key, "schema", key) not in (CONF_QUIET_HOURS, CONF_QUIET_CHARGER_ENTITY)
-            })
 
         return self.async_show_form(
             step_id="init",
