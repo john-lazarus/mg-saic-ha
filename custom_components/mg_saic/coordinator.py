@@ -6,7 +6,9 @@ from contextlib import suppress
 from homeassistant.config_entries import ConfigEntryNotReady
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.event import (
+    async_call_later,
     async_track_point_in_utc_time,
+    async_track_state_change_event,
     async_track_time_change,
 )
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
@@ -32,6 +34,8 @@ from .logic import (
 from .trip_stats import TripStatsManager, TripSnapshot, ChargeSnapshot
 from .cached_status import summarise_cached_status
 from .quiet_hours import (
+    CHARGER_STOP_SETTLE,
+    CONF_QUIET_CHARGER_ENTITY,
     CONF_QUIET_HOURS,
     CONF_QUIET_HOURS_END,
     CONF_QUIET_HOURS_LIVE_POLLING,
@@ -39,6 +43,7 @@ from .quiet_hours import (
     CONF_QUIET_HOURS_START,
     DEFAULT_QUIET_HOURS_END,
     DEFAULT_QUIET_HOURS_START,
+    charger_says_charging,
     finish_check_delay,
     format_hhmm,
     in_quiet_window,
@@ -233,6 +238,12 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # The stored copy (its statusTime) a quiet-hours live poll was last
         # spent on, so one copy never buys two polls.
         self._quiet_polled_for_epoch: int | None = None
+        # The owner's charger status entity, if they picked one (#269).
+        self.quiet_charger_entity: str | None = (
+            config_entry.options.get(CONF_QUIET_CHARGER_ENTITY) or None
+        )
+        self._charger_unsub = None
+        self._charger_stop_unsub = None
         # The last charging reply the car gave, for the charging controls
         # while the car isn't answering that request (#419).
         self.last_charging_data = None
@@ -928,6 +939,8 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             CONF_HOLIDAY_UPDATE_INTERVAL, self.holiday_update_interval
         )
         quiet_before = (self.quiet_hours, self.quiet_hours_start, self.quiet_hours_end)
+        charger_before = getattr(self, "quiet_charger_entity", None)
+        self.quiet_charger_entity = options.get(CONF_QUIET_CHARGER_ENTITY) or None
         self.quiet_hours = bool(options.get(CONF_QUIET_HOURS, False))
         self.quiet_hours_start = parse_hhmm(
             options.get(CONF_QUIET_HOURS_START), self.quiet_hours_start
@@ -942,6 +955,8 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             self._start_quiet_hours()
             if self.quiet_hours and self.live_polling != before:
                 self._save_live_polling()
+        if self.quiet_charger_entity != charger_before:
+            self._watch_charger()
         self.stale_data_threshold = timedelta(
             hours=options.get(
                 CONF_STALE_DATA_THRESHOLD,
@@ -1225,6 +1240,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         self.is_initial_setup = False
 
         self._start_quiet_hours(restore=True)
+        self._watch_charger()
 
         # NOTE: set_alarm_switches and message-queue polling are no longer
         # managed here.  Both are handled by __init__.async_setup_entry under
@@ -3085,6 +3101,21 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         """
         now = utcnow()
         due = self._quiet_finish_check_at
+        if (
+            due is not None
+            and now >= due - timedelta(seconds=30)
+            and self._charger_charging() is True
+        ):
+            # The charger says it's still going: the poll that would flash
+            # an HS. Its "stopped" is what triggers the check now.
+            self._quiet_finish_check_at = None
+            LOGGER.info(
+                "Quiet charging: %s still says charging; VIN %s will be "
+                "checked when it stops",
+                self.quiet_charger_entity,
+                self.vin,
+            )
+            due = None
         if due is not None and now >= due - timedelta(seconds=30):
             self._quiet_finish_check_at = None
             LOGGER.info(
@@ -3120,7 +3151,11 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             }
         polled_for = getattr(self, "_quiet_polled_for_epoch", None)
         reason = None
-        if stored_charge_started(
+        if self._charger_charging() is not None:
+            # The charger says when the car charges; the stored copy is only
+            # the fallback for owners without one.
+            pass
+        elif stored_charge_started(
             flag,
             epoch,
             known_charging=bool(self.is_charging),
@@ -3174,6 +3209,90 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         if not getattr(self, "_action_interval_active", False):
             self._adjust_update_interval()
         return self.data
+
+    # ── The owner's charger (#269) ──────────────────────────────────────────
+
+    def _charger_charging(self):
+        """What the charger entity says now: True, False, or None (no entity
+        or no usable state)."""
+        entity_id = getattr(self, "quiet_charger_entity", None)
+        if not entity_id or not getattr(self, "quiet_hours", False):
+            return None
+        hass = getattr(self, "hass", None)
+        state = hass.states.get(entity_id) if hass is not None else None
+        return charger_says_charging(getattr(state, "state", None))
+
+    def _watch_charger(self) -> None:
+        """(Re)subscribe to the charger entity's state changes."""
+        for name in ("_charger_unsub", "_charger_stop_unsub"):
+            unsub = getattr(self, name, None)
+            if unsub is not None:
+                unsub()
+            setattr(self, name, None)
+        entity_id = getattr(self, "quiet_charger_entity", None)
+        if not entity_id or not self.quiet_hours:
+            return
+        self._charger_unsub = async_track_state_change_event(
+            self.hass, [entity_id], self._handle_charger_change
+        )
+        LOGGER.info(
+            "Quiet charging for VIN %s: following %s for when the car charges",
+            self.vin,
+            entity_id,
+        )
+
+    async def _handle_charger_change(self, event) -> None:
+        """The charger started or stopped: one live poll, timed to add no
+        flash of its own (see CONF_QUIET_CHARGER_ENTITY)."""
+        data = getattr(event, "data", None) or {}
+        new = charger_says_charging(getattr(data.get("new_state"), "state", None))
+        old = charger_says_charging(getattr(data.get("old_state"), "state", None))
+        # Only a real change counts: a charger coming back from unavailable
+        # (or Home Assistant restarting) mid-charge must not cost a poll --
+        # that one would flash an HS's lights.
+        if new is None or old is None or new == old:
+            return
+        if not self.quiet_active or self.is_powered_on:
+            return
+        if new:
+            if self._charger_stop_unsub is not None:
+                self._charger_stop_unsub()
+                self._charger_stop_unsub = None
+                LOGGER.debug(
+                    "Quiet charging: %s resumed charging within %s; no poll",
+                    self.quiet_charger_entity,
+                    CHARGER_STOP_SETTLE,
+                )
+                return
+            if self.is_charging:
+                return
+            LOGGER.info(
+                "Quiet charging: %s says charging; one live poll for VIN %s",
+                self.quiet_charger_entity,
+                self.vin,
+            )
+            await self.async_request_refresh()
+            return
+        if self._charger_stop_unsub is None:
+            self._charger_stop_unsub = async_call_later(
+                self.hass,
+                CHARGER_STOP_SETTLE.total_seconds(),
+                self._handle_charger_stopped,
+            )
+
+    async def _handle_charger_stopped(self, _now=None) -> None:
+        """The charger has said "not charging" for CHARGER_STOP_SETTLE."""
+        self._charger_stop_unsub = None
+        if self._charger_charging() is not False:
+            return
+        if not self.quiet_active or self.is_powered_on:
+            return
+        LOGGER.info(
+            "Quiet charging: %s stopped charging; one live poll for VIN %s",
+            self.quiet_charger_entity,
+            self.vin,
+        )
+        await self.async_request_refresh()
 
     def _quiet_charge_context(self):
         """From the last live poll: plugged in?, battery %, target %, lock."""
@@ -3627,6 +3746,11 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         __init__.async_unload_entry, which stops the poller only when the last
         coordinator for that account is unloaded.
         """
+        for name in ("_charger_unsub", "_charger_stop_unsub"):
+            unsub = getattr(self, name, None)
+            if unsub is not None:
+                unsub()
+                setattr(self, name, None)
         if self._shutdown_refresh_task and not self._shutdown_refresh_task.done():
             self._shutdown_refresh_task.cancel()
             with suppress(asyncio.CancelledError):

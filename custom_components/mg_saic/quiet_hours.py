@@ -40,6 +40,10 @@ switch is off and the car is switched off:
   until the charging flag shows it has started again;
 - at the end time Live Polling comes back on, with one live poll to catch up.
 
+With a charger status entity picked (CONF_QUIET_CHARGER_ENTITY), the charger
+says when: one live poll the moment it starts charging, one once it has
+stopped for CHARGER_STOP_SETTLE, and the stored copy is only the fallback.
+
 A car switched on during quiet hours is polled as normal, and a refresh the
 owner asks for (Update Vehicle Data) always reaches the car.
 
@@ -55,6 +59,18 @@ from typing import Any, Optional
 CONF_QUIET_HOURS = "quiet_hours"
 CONF_QUIET_HOURS_START = "quiet_hours_start"
 CONF_QUIET_HOURS_END = "quiet_hours_end"
+# An optional entity from the owner's charger (a zappi, Ohme or Pod Point
+# status, say) that says when the car is charging. The car never tells SAIC
+# when a charge starts, and an HS PHEV flashes its lights at every live poll
+# while charging -- but it also flashes them by itself as a charge starts.
+# Polling the moment the charger says "charging" lands inside that flash, and
+# polling once it has stopped lands after the car has: no extra flashes
+# (@HarryFlatter, #269, from his security camera on 13 Oct).
+CONF_QUIET_CHARGER_ENTITY = "quiet_charging_charger_entity"
+# How long the charger must say "not charging" before the "finished" poll, so
+# a charger's brief pauses (a zappi's one-minute "Waiting for EV") don't
+# each cost a poll.
+CHARGER_STOP_SETTLE = timedelta(minutes=2)
 # The Live Polling switch's state, and when it was last set (ISO, UTC), so it
 # survives a restart.
 CONF_QUIET_HOURS_LIVE_POLLING = "quiet_hours_live_polling"
@@ -64,8 +80,13 @@ DEFAULT_QUIET_HOURS_START = time(hour=22, minute=0)
 DEFAULT_QUIET_HOURS_END = time(hour=7, minute=0)
 
 # Added to the expected finish so the check lands after the charge, not on
-# its last minutes (when an HS would still be charging, and flashing).
-FINISH_CHECK_MARGIN = timedelta(minutes=15)
+# its last minutes (when an HS would still be charging, and flashing): this,
+# or FINISH_CHECK_MARGIN_SHARE of the time remaining if that is longer. The
+# car's own estimate runs short: @HarryFlatter's HS, 13 Oct, said 39 minutes
+# to go at 00:39 and finished at 01:38, 20 minutes late, after a zappi pause
+# and the slow last few %. With 15 minutes the check found it still charging.
+FINISH_CHECK_MARGIN = timedelta(minutes=30)
+FINISH_CHECK_MARGIN_SHARE = 0.25
 # Never sooner than this after the poll that worked it out.
 FINISH_CHECK_MIN = timedelta(minutes=15)
 # When nothing says how long the charge will take.
@@ -172,6 +193,22 @@ def parse_saved_at(value: Any) -> Optional[datetime]:
     except ValueError:
         return None
     return parsed if parsed.tzinfo is not None else None
+
+
+def charger_says_charging(state: Any) -> Optional[bool]:
+    """Whether the charger entity's state means the car is charging.
+
+    ``on`` (a binary sensor) or ``charging`` in any capitalisation (zappi
+    "Charging", Ohme and Pod Point "charging"). None when there is no usable
+    state (unknown, unavailable, missing), so a charger dropping off the
+    network is not taken as the charge ending.
+    """
+    if not isinstance(state, str):
+        return None
+    value = state.strip().lower()
+    if value in ("", "unknown", "unavailable", "none"):
+        return None
+    return value in ("on", "charging")
 
 
 def stored_charging_flag(summary: Optional[dict]) -> Optional[int]:
@@ -310,4 +347,5 @@ def finish_check_delay(remaining: Optional[timedelta]) -> timedelta:
     """How long to wait before the "has it finished?" poll."""
     if remaining is None:
         return FINISH_CHECK_FALLBACK
-    return max(remaining + FINISH_CHECK_MARGIN, FINISH_CHECK_MIN)
+    margin = max(FINISH_CHECK_MARGIN, remaining * FINISH_CHECK_MARGIN_SHARE)
+    return max(remaining + margin, FINISH_CHECK_MIN)

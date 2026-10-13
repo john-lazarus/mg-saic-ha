@@ -120,6 +120,16 @@ They only go unavailable if the car has never answered the charging request sinc
 
 To stop using it altogether, untick **Quiet charging** in Configure: the three controls go and polling is normal all the time. The switch only overrides the times for now.
 
+**Using your charger (recommended)** *(from 1.4.0-beta7)*: in Configure, **Quiet charging: charger status** lets you pick your charger's status sensor from the usual searchable list (sensors, binary sensors and input_boolean helpers; you can also type or paste an entity ID). A zappi **Plug status**, Ohme or Pod Point status sensor works as it is: it counts as charging when it reads `on` or `charging`, in any capitalisation. (On a zappi, use **Plug status**, not **Status**: Status shows the zappi's mode, such as Boosting, which can show before the car actually starts.) For anything else, pick a template binary sensor that is on while charging, or an input_boolean that an automation turns on and off.
+
+The car never tells SAIC when it starts charging, and on an MG HS PHEV every live poll during a charge turns the lights on. With a charger picked:
+
+- **The charger starts charging:** one live poll straight away. The car turns its lights on by itself at the start of a charge, so this poll adds no flash of its own.
+- **The charger stops,** and is still stopped 2 minutes later: one live poll, after the car has stopped, so no flash, and an exact finish. A pause shorter than 2 minutes (a zappi's one-minute "Waiting for EV") costs nothing.
+- **The predicted "has it finished?" check** is held back while the charger still says charging.
+- **SAIC's stored status** is then only a fallback, used while the charger's entity is unavailable.
+- A charger coming back from unavailable, or Home Assistant restarting, mid-charge doesn't count as a start, so it doesn't cost a poll.
+
 **While Quiet Charging is on and the car is switched off:**
 
 - Scheduled polls read the stored status at your normal idle interval (or the Holiday Mode one), never faster, even while charging.
@@ -129,7 +139,7 @@ To stop using it altogether, untick **Quiet charging** in Configure: the three c
   - *(from 1.4.0-beta6)* the stored status rewritten with the car's lock state changed since the last live poll, for a car Home Assistant last saw unplugged. That's you getting home, or going out to the car, after the start time and plugging in: on an HS PHEV the copy written then says unlocked. Routine reports don't change the lock state.
 
   Each stored status buys one live poll at most: if the car turns out to be waiting for its slot, nothing more is asked until the stored status changes again.
-- **When the charge should have finished**, one live poll checks. The time comes from the car's own "time remaining" figure where it gives one, otherwise from the battery level, your target and the charging power, plus 15 minutes. If the car has not finished (a smart tariff pausing it, for example), nothing more is asked until the stored status shows charging has started again.
+- **When the charge should have finished**, one live poll checks. The time comes from the car's own "time remaining" figure where it gives one, otherwise from the battery level, your target and the charging power, plus 30 minutes, or a quarter of the time remaining if that's longer: the car's own estimate tends to run short near the end *(from 1.4.0-beta7; 15 minutes before)*. If the car has not finished (a smart tariff pausing it, for example), nothing more is asked until the stored status shows charging has started again.
 - **At the end time**, Quiet Charging turns off, with one live poll to catch up.
 
 **What you give up:** live battery % and charging power during the night. A charge seen by the live poll at its start is recorded as normal. From 1.4.0-beta3, one that starts and finishes without a live poll seeing it is still recorded at the end time, from the battery % before and after: see *Charges no poll saw* in [Trip & efficiency statistics](sensors.md#trip--efficiency-statistics).

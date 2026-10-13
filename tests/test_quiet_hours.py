@@ -178,8 +178,11 @@ class FinishTimeTests(unittest.TestCase):
         )
 
     def test_the_check_lands_after_the_finish(self):
-        self.assertEqual(QH.finish_check_delay(timedelta(hours=3)), timedelta(hours=3, minutes=15))
-        self.assertEqual(QH.finish_check_delay(timedelta(0)), timedelta(minutes=15))
+        # 30 minutes, or a quarter of the time remaining if that's longer.
+        self.assertEqual(QH.finish_check_delay(timedelta(hours=3)), timedelta(hours=3, minutes=45))
+        self.assertEqual(QH.finish_check_delay(timedelta(minutes=39)), timedelta(minutes=69))
+        self.assertEqual(QH.finish_check_delay(timedelta(minutes=8)), timedelta(minutes=38))
+        self.assertEqual(QH.finish_check_delay(timedelta(0)), timedelta(minutes=30))
         self.assertEqual(QH.finish_check_delay(None), timedelta(hours=2))
 
 
@@ -275,6 +278,17 @@ def _coordinator(*, flag=0, taken=LAST_LIVE + 3600, charging=False, read_error=N
 
 def _saved_options(c):
     return c.hass.config_entries.async_update_entry.call_args.kwargs["options"]
+
+
+class HarrysFinishCheckTests(unittest.TestCase):
+    """13 Oct: the car said 39 minutes to go at 00:39:34; it finished at
+    01:38:38. The check must land after that."""
+
+    def test_the_check_lands_after_the_real_finish(self):
+        polled = datetime(2026, 10, 13, 0, 39, 34)
+        finished = datetime(2026, 10, 13, 1, 38, 38)
+        check = polled + QH.finish_check_delay(timedelta(minutes=39))
+        self.assertGreater(check, finished)
 
 
 class QuietUpdateTests(unittest.TestCase):
@@ -460,12 +474,12 @@ class FinishCheckTests(unittest.TestCase):
 
     def test_from_the_cars_time_remaining(self):
         due = self._schedule(self._charging_data(chrgngRmnngTime=90, chrgngRmnngTimeV=0))
-        self.assertEqual(due, NOW + timedelta(minutes=105))
+        self.assertEqual(due, NOW + timedelta(minutes=120))  # 90 + 30
 
     def test_from_the_battery_when_the_car_gives_no_time(self):
         # 60 % to 100 % (no target set) of 50 kWh at 1 kW: 20 hours.
         due = self._schedule(self._charging_data())
-        self.assertEqual(due, NOW + timedelta(hours=20, minutes=15))
+        self.assertEqual(due, NOW + timedelta(hours=25))  # 20 h + a quarter
 
     def test_nothing_to_go_on(self):
         due = self._schedule(None)
