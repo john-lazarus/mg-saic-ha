@@ -35,7 +35,7 @@ jobs:
           )["requirements"]
           print(next(req for req in requirements if req.startswith("mg-saic-client")))
           PY
-          )"
+          )" pytest
       - name: Check for undefined names
         # A missing import is invisible to py_compile and to unit tests that
         # never reach the line — 1.2.7-beta8 shipped a NameError in the
@@ -53,3 +53,6 @@ jobs:
 
       - name: Run unit tests
         run: python -m unittest discover -s tests -p "test_*.py"
+
+      - name: Run global config flow lifecycle tests
+        run: python -m pytest -q tests/test_global_config_flow_lifecycle.py

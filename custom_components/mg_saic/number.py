@@ -6,7 +6,9 @@ from homeassistant.components.number import (
     NumberDeviceClass,
 )
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.const import PERCENTAGE, UnitOfTemperature
+from .api import CommandsLimitReachedException, VehicleNotLockedException
 from .backends import Feature
 from .logic import charging_data_for_controls
 from .const import (
@@ -43,11 +45,12 @@ async def async_setup_entry(hass, entry, async_add_entities):
 
     # Climate Target Temperature — a standalone, display-only number that
     # mirrors the climate entity's setpoint (shared via the coordinator).
-    # Created for every vehicle: it makes the setpoint reachable by automations
+    # Only created where the backend can apply a setpoint, making it reachable by automations
     # and voice assistants, and changing it never sends a command on its own.
-    number_entities.append(
-        SAICMGClimateTargetTempNumber(coordinator, client, entry, vin_info, vin)
-    )
+    if getattr(client, "region_name", None) != "India":
+        number_entities.append(
+            SAICMGClimateTargetTempNumber(coordinator, client, entry, vin_info, vin)
+        )
 
     async_add_entities(number_entities)
 
@@ -136,8 +139,8 @@ class SAICMGTargetSOCNumber(CoordinatorEntity, NumberEntity):
 
     async def async_set_native_value(self, value: float) -> None:
         """Set the target SOC to the specified value."""
-        target_soc = int(value)
         try:
+            target_soc = int(value)
             immediate_interval = self.coordinator.after_action_delay
             long_interval = self.coordinator.target_soc_long_interval
 
@@ -149,8 +152,16 @@ class SAICMGTargetSOCNumber(CoordinatorEntity, NumberEntity):
                 immediate_interval,
                 long_interval,
             )
+        except CommandsLimitReachedException:
+            await self.coordinator.notify_command_limit_reached(self._vin)
+            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
+        except VehicleNotLockedException:
+            await self.coordinator.notify_vehicle_not_locked(self._vin)
+            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
         except Exception as e:
             LOGGER.error("Error setting Target SOC for VIN %s: %s", self._vin, e)
+            self.coordinator.record_command_error("Error setting Target SOC", e)
+            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
 
 
 class SAICMGClimateTargetTempNumber(CoordinatorEntity, NumberEntity):

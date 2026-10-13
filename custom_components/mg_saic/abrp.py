@@ -113,7 +113,7 @@ class AbrpApi:
         return data.get("vehicle_name")
 
     async def async_send(
-        self, vehicle_status: Any, charge_info: Any
+        self, vehicle_status: Any, charge_info: Any, *, prefer_basic=None, allow_basic_soc=False
     ) -> tuple[bool, str]:
         """Build a telemetry payload from SAIC data and POST it to ABRP.
 
@@ -121,7 +121,10 @@ class AbrpApi:
         the coordinator's update cycle.
         """
         try:
-            tlm = self._build_payload(vehicle_status, charge_info)
+            tlm = self._build_payload(
+                vehicle_status, charge_info,
+                prefer_basic=prefer_basic, allow_basic_soc=allow_basic_soc,
+            )
         except Exception as err:  # noqa: BLE001 - defensive
             return False, f"payload build failed: {err}"
 
@@ -149,7 +152,7 @@ class AbrpApi:
 
     # --- payload construction ------------------------------------------------
 
-    def _build_payload(self, vehicle_status: Any, charge_info: Any) -> dict[str, Any]:
+    def _build_payload(self, vehicle_status: Any, charge_info: Any, *, prefer_basic=None, allow_basic_soc=False) -> dict[str, Any]:
         charge_mgmt = getattr(charge_info, "chrgMgmtData", None)
         charge_status = getattr(charge_info, "rvsChargeStatus", None)
 
@@ -183,10 +186,14 @@ class AbrpApi:
                 data["current"] = decoded_current
 
         basic = getattr(vehicle_status, "basicVehicleStatus", None)
+        if prefer_basic is not None and allow_basic_soc and (prefer_basic or "soc" not in data):
+            soc = getattr(basic, "extendedData1", None)
+            if _in_range(soc, 0, 100):
+                data["soc"] = float(soc)
         if basic is not None:
             data.update(self._basic(basic))
 
-        data.update(self._electric_range(basic, charge_status))
+        data.update(self._electric_range(basic, charge_status, prefer_basic=prefer_basic))
 
         gps = getattr(vehicle_status, "gpsPosition", None)
         if gps is not None:
@@ -224,16 +231,22 @@ class AbrpApi:
 
         return data
 
-    def _electric_range(self, basic: Any, charge_status: Any) -> dict[str, Any]:
+    def _electric_range(self, basic: Any, charge_status: Any, *, prefer_basic=None) -> dict[str, Any]:
         candidates = [
             getattr(basic, "fuelRangeElec", None) if basic is not None else None,
             getattr(charge_status, "fuelRangeElec", None)
             if charge_status is not None
             else None,
         ]
+        # India uses actual frame order with a usable-field fallback. None
+        # preserves the global backend's legacy maximum-range selection.
+        if prefer_basic is False:
+            candidates.reverse()
         best = 0.0
         for raw in candidates:
             if _in_range(raw, 1, 20460):  # stored x10, km
+                if prefer_basic is not None:
+                    return {"est_battery_range": raw / 10.0}
                 best = max(best, raw / 10.0)
         return {"est_battery_range": best} if best > 0 else {}
 

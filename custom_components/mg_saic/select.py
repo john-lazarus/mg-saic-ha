@@ -3,6 +3,7 @@
 from homeassistant.components.select import SelectEntity
 from homeassistant.components.climate import HVACMode
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.exceptions import HomeAssistantError
 from .logic import charging_data_for_controls
 from .const import (
     DOMAIN,
@@ -70,7 +71,9 @@ async def async_setup_entry(hass, entry, async_add_entities):
         # meant to be a standalone mirror of the climate entity's own mode
         # dropdown, so the two must read identically (#380-adjacent report).
         mode_options = ["Off", "Cool", "Fan only", "Heat/cool"]
-        if coordinator.climate_status_heat:
+        if getattr(client, "region_name", None) == "India":
+            mode_options = ["Off", "Heat/cool"]
+        elif coordinator.climate_status_heat:
             mode_options.append("Heat")
         select_entities.append(
             SAICMGClimateModeSelect(
@@ -187,21 +190,21 @@ class SAICMGChargingCurrentSelect(CoordinatorEntity, SelectEntity):
                 LOGGER.error(
                     "No charging data available to set charging current limit."
                 )
-                return
+                raise HomeAssistantError("Charging data is unavailable")
 
             chrg_mgmt_data = getattr(charging_data, "chrgMgmtData", None)
             if not chrg_mgmt_data:
                 LOGGER.error(
                     "No charging management data available to set charging current limit."
                 )
-                return
+                raise HomeAssistantError("Charging management data is unavailable")
 
             target_soc_value = getattr(chrg_mgmt_data, "bmsOnBdChrgTrgtSOCDspCmd", None)
             if target_soc_value is None:
                 LOGGER.error(
                     "Target SOC value is not available to set charging current limit."
                 )
-                return
+                raise HomeAssistantError("Target SOC is unavailable")
 
             # Map the target_soc_value to BatterySoc enum
             target_soc_enum = {
@@ -234,9 +237,12 @@ class SAICMGChargingCurrentSelect(CoordinatorEntity, SelectEntity):
                 immediate_interval,
                 long_interval,
             )
-        except ValueError as e:
-            LOGGER.error("Invalid option selected: %s", option)
-            raise
+        except CommandsLimitReachedException:
+            await self.coordinator.notify_command_limit_reached(self._vin)
+            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
+        except VehicleNotLockedException:
+            await self.coordinator.notify_vehicle_not_locked(self._vin)
+            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
         except Exception as e:
             LOGGER.error(
                 "Error setting Charging Current Limit to %s for VIN %s: %s",
@@ -244,6 +250,8 @@ class SAICMGChargingCurrentSelect(CoordinatorEntity, SelectEntity):
                 self._vin,
                 e,
             )
+            self.coordinator.record_command_error("Error setting Charging Current Limit", e)
+            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
 
 
 class SAICMGScheduledChargingModeSelect(CoordinatorEntity, SelectEntity):
@@ -345,13 +353,11 @@ class SAICMGScheduledChargingModeSelect(CoordinatorEntity, SelectEntity):
 
     async def async_select_option(self, option: str):
         """Apply the selected scheduled charging mode with the current window."""
-        mode_name = SCHEDULED_CHARGING_MODE_LABELS.get(option)
-        if mode_name is None:
-            LOGGER.error("Invalid scheduled charging mode option: %s", option)
-            return
-        mode = ScheduledChargingMode[mode_name]
-
         try:
+            mode_name = SCHEDULED_CHARGING_MODE_LABELS.get(option)
+            if mode_name is None:
+                raise HomeAssistantError("Invalid scheduled charging mode option")
+            mode = ScheduledChargingMode[mode_name]
             start, end = self._resolve_window()
             await self._client.set_scheduled_charging(self._vin, start, end, mode)
             LOGGER.info(
@@ -368,8 +374,10 @@ class SAICMGScheduledChargingModeSelect(CoordinatorEntity, SelectEntity):
             )
         except CommandsLimitReachedException:
             await self.coordinator.notify_command_limit_reached(self._vin)
+            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
         except VehicleNotLockedException:
             await self.coordinator.notify_vehicle_not_locked(self._vin)
+            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
         except Exception as e:
             LOGGER.error(
                 "Error setting scheduled charging mode to %s for VIN %s: %s",
@@ -380,6 +388,7 @@ class SAICMGScheduledChargingModeSelect(CoordinatorEntity, SelectEntity):
             self.coordinator.record_command_error(
                 "Error setting scheduled charging mode", e
             )
+            raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
 
 
 class SAICMGHeatedSeatLevelSelect(CoordinatorEntity, SelectEntity):
@@ -524,10 +533,12 @@ class SAICMGClimateModeSelect(CoordinatorEntity, SelectEntity):
         climate = self.coordinator.climate_entity
         if climate is None:
             LOGGER.warning("Climate entity not ready; cannot set the climate mode.")
-            return
+            self.coordinator.record_command_error("Climate mode unavailable", "Climate entity not ready")
+            raise HomeAssistantError("Climate entity not ready") from None
         hvac = CLIMATE_MODE_OPTION_TO_HVAC.get(option)
         if hvac is None:
             LOGGER.warning("Unknown climate mode option: %s", option)
-            return
+            self.coordinator.record_command_error("Unsupported climate mode", "Unknown climate mode option")
+            raise HomeAssistantError("Unknown climate mode option") from None
         await climate.async_set_hvac_mode(hvac)
         self.coordinator.async_update_listeners()

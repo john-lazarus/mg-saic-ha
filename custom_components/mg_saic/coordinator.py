@@ -3,7 +3,8 @@
 from datetime import datetime, timedelta, timezone
 import asyncio
 from contextlib import suppress
-from homeassistant.config_entries import ConfigEntryNotReady
+from homeassistant.config_entries import ConfigEntryAuthFailed, ConfigEntryNotReady
+from homeassistant.exceptions import ConfigEntryError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.event import (
     async_call_later,
@@ -14,7 +15,7 @@ from homeassistant.helpers.event import (
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util.dt import now as local_now, utcnow
 from .api import SAICMGAPIClient, CommandsLimitReachedException
-from .errors import is_session_expired, is_vehicle_unreachable
+from .errors import india_login_rejection, is_session_expired, is_vehicle_unreachable
 from .backends import Feature
 from .backends import backend_supports as _backend_supports
 from .logic import (
@@ -222,7 +223,9 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # read SAIC's stored status instead of waking the car. See
         # quiet_hours.py. live_polling is the opposite of the Quiet Charging switch:
         # the two times flip it, and the owner (or an automation) can too.
-        self.quiet_hours = bool(config_entry.options.get(CONF_QUIET_HOURS, False))
+        self.quiet_hours = bool(config_entry.options.get(CONF_QUIET_HOURS, False)) and callable(
+            getattr(client, "get_cached_vehicle_status", None)
+        )
         self.quiet_hours_start = parse_hhmm(
             config_entry.options.get(CONF_QUIET_HOURS_START), DEFAULT_QUIET_HOURS_START
         )
@@ -240,7 +243,8 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         self._quiet_polled_for_epoch: int | None = None
         # The owner's charger status entity, if they picked one (#269).
         self.quiet_charger_entity: str | None = (
-            config_entry.options.get(CONF_QUIET_CHARGER_ENTITY) or None
+            (config_entry.options.get(CONF_QUIET_CHARGER_ENTITY) or None)
+            if self.quiet_hours else None
         )
         self._charger_unsub = None
         self._charger_stop_unsub = None
@@ -940,8 +944,12 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         )
         quiet_before = (self.quiet_hours, self.quiet_hours_start, self.quiet_hours_end)
         charger_before = getattr(self, "quiet_charger_entity", None)
-        self.quiet_charger_entity = options.get(CONF_QUIET_CHARGER_ENTITY) or None
-        self.quiet_hours = bool(options.get(CONF_QUIET_HOURS, False))
+        self.quiet_hours = bool(options.get(CONF_QUIET_HOURS, False)) and callable(
+            getattr(self.client, "get_cached_vehicle_status", None)
+        )
+        self.quiet_charger_entity = (
+            (options.get(CONF_QUIET_CHARGER_ENTITY) or None) if self.quiet_hours else None
+        )
         self.quiet_hours_start = parse_hhmm(
             options.get(CONF_QUIET_HOURS_START), self.quiet_hours_start
         )
@@ -1143,7 +1151,16 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 f"MG SAIC API did not respond within {STARTUP_API_TIMEOUT}s at "
                 f"startup for VIN {vin} — HA will retry automatically in the background."
             )
+        except (ConfigEntryAuthFailed, ConfigEntryError) as err:
+            from . import _raise_india_login_failure
+            _raise_india_login_failure(err)
+            raise
         except Exception as e:
+            rejection = india_login_rejection(e)
+            if rejection is not None:
+                raise rejection from None
+            if getattr(self.client, "region_name", None) == "India":
+                raise ConfigEntryNotReady("MG India is unavailable at startup; HA will retry.") from None
             raise ConfigEntryNotReady(
                 f"MG SAIC API unavailable at startup for VIN {vin}: {e} "
                 f"— HA will retry automatically in the background."
@@ -1389,6 +1406,8 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                     # stale/wrong data as if it were current.
                     data["status"] = None
             except Exception as e:
+                if isinstance(e, (ConfigEntryAuthFailed, ConfigEntryError)):
+                    raise
                 # During first setup, a vehicle status failure must not prevent
                 # the integration from loading.
                 if self.is_initial_setup:
@@ -1455,6 +1474,8 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                     data["charging"] = None
                     charging_error = f"Timed out after {charging_timeout}s"
                 except Exception as e:
+                    if isinstance(e, (ConfigEntryAuthFailed, ConfigEntryError)):
+                        raise
                     LOGGER.warning(
                         "Charging info unavailable for VIN %s: %s — proceeding "
                         "without it; will retry on the next update",
@@ -1468,9 +1489,22 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 # its retries are exhausted, so a missing payload with no
                 # recorded error is a failure too.
                 now = datetime.now(timezone.utc)
+                source_time = None
+                if data["charging"] is not None and getattr(self.client, "region_name", None) == "India":
+                    source_epoch = getattr(data["charging"], "statusTime", None)
+                    last_charge = self.charging_freshness.last_success
+                    if (
+                        source_epoch is None
+                        or not self._is_status_timestamp_valid(data["charging"])
+                        or (last_charge is not None and source_epoch <= last_charge.timestamp())
+                    ):
+                        data["charging"] = None
+                        charging_error = "Missing, stale or invalid vehicle charge timestamp"
+                    else:
+                        source_time = datetime.fromtimestamp(source_epoch, tz=timezone.utc)
                 if data["charging"] is not None:
-                    self.charging_freshness.record_success(now)
-                    self._apply_counter_reset_guard(data["charging"], now)
+                    self.charging_freshness.record_success(now, source_time=source_time)
+                    self._apply_counter_reset_guard(data["charging"], source_time or now)
                 else:
                     self.charging_freshness.record_failure(
                         now, charging_error or "No response after retries"
@@ -1616,7 +1650,15 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
 
             session = async_get_clientsession(self.hass)
             sent, message = await AbrpApi(session, api_key, user_token).async_send(
-                status, data.get("charging")
+                status, data.get("charging"),
+                prefer_basic=(
+                    self.prefer_basic_measurements(data.get("charging"), status)
+                    if getattr(self.client, "region_name", None) == "India" else None
+                ),
+                allow_basic_soc=(
+                    self.vehicle_type == "BEV"
+                    or self.backend_supports(Feature.STATE_OF_CHARGE_NON_BEV)
+                ),
             )
             if sent:
                 LOGGER.debug("ABRP telemetry sent for VIN %s", self.vin)
@@ -1630,7 +1672,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
     # Update Vehicle State
     # ── Trip statistics (#301) ───────────────────────────────────────────────
 
-    def _trip_snapshot(self, basic_status, charging_data):
+    def _trip_snapshot(self, basic_status, charging_data, *, prefer_basic=False):
         """Build a TripSnapshot from the current poll's data.
 
         Mirrors the odometer/SOC extraction used by the mileage and SOC
@@ -1645,8 +1687,21 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         return TripSnapshot(
             ts=datetime.now(timezone.utc).isoformat(),
             odometer_km=odometer,
-            soc_pct=self._extract_soc_pct(basic_status, charging_data),
-            fuel_pct=self._extract_fuel_pct(basic_status),
+            soc_pct=self._extract_soc_pct(
+                basic_status, charging_data,
+                prefer_basic=prefer_basic,
+                allow_basic_soc=(
+                    self.vehicle_type == "BEV"
+                    or self.backend_supports(Feature.STATE_OF_CHARGE_NON_BEV)
+                ),
+            ),
+            fuel_pct=self._extract_fuel_pct(
+                basic_status,
+                allow_fuel=not (
+                    getattr(self.client, "region_name", None) == "India"
+                    and self.vehicle_type == "BEV"
+                ),
+            ),
             since_charge_km=km,
             since_charge_kwh=kwh,
         )
@@ -1695,28 +1750,50 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             saturation=MILEAGE_UINT16_SATURATION,
         )
 
+    def prefer_basic_measurements(self, charging_data, status=None):
+        """Whether the supplied ordinary India frame is newer; validate each field."""
+        if getattr(self.client, "region_name", None) != "India":
+            return False
+        if status is None:
+            status = (self.data or {}).get("status")
+        charge_time = getattr(charging_data, "statusTime", None)
+        status_time = getattr(status, "statusTime", None)
+        return (
+            charge_time is not None
+            and status_time is not None
+            and status_time > charge_time
+        )
+
     @staticmethod
-    def _extract_soc_pct(basic_status, charging_data):
+    def _extract_soc_pct(basic_status, charging_data, *, allow_basic_soc=True, prefer_basic=False):
         """SOC % — charging bmsPackSOCDsp (×0.1), else basic extendedData1 (int %).
 
         Mirrors the SOC sensor's own fallback so a momentary charging-endpoint
         dropout doesn't leave a trip snapshot with no SOC — which would drop the
         whole trip's efficiency (energy needs a start AND end SOC).
         """
+        if prefer_basic and allow_basic_soc:
+            raw = getattr(basic_status, "extendedData1", None) if basic_status else None
+            if raw is not None and 0 <= raw <= 100:
+                return float(raw)
         chrg = getattr(charging_data, "chrgMgmtData", None) if charging_data else None
         raw = getattr(chrg, "bmsPackSOCDsp", None) if chrg is not None else None
-        if raw is not None and raw != -128:
+        if raw is not None and 0 <= raw <= 1000:
             # Rounded: the car reports tenths, and 493 * 0.1 is
             # 49.300000000000004, which ended up in charge records as is.
             return round(raw * DATA_DECIMAL_CORRECTION_SOC, 1)
+        if not allow_basic_soc:
+            return None
         raw = getattr(basic_status, "extendedData1", None) if basic_status else None
-        if raw is not None and raw not in (-128, -1):
+        if raw is not None and 0 <= raw <= 100:
             return float(raw)
         return None
 
     @staticmethod
-    def _extract_fuel_pct(basic_status):
+    def _extract_fuel_pct(basic_status, *, allow_fuel=True):
         """Fuel level % from basicVehicleStatus (0 is a valid reading), or None."""
+        if not allow_fuel:
+            return None
         raw = getattr(basic_status, "fuelLevelPrc", None) if basic_status else None
         if raw is not None and 0 <= raw <= 100:
             return float(raw)
@@ -1741,7 +1818,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         gun = bool(getattr(rcs, "chargingGunState", False)) if rcs is not None else False
         return charging or (gun and status != 0), charging
 
-    def _update_trip_state(self, power_mode, basic_status, charging_data):
+    def _update_trip_state(self, power_mode, basic_status, charging_data, *, prefer_basic=False):
         """Open/close a trip based on the current power mode (#301).
 
         Keyed off power_mode + whether a trip is already open — NOT the
@@ -1759,7 +1836,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         if self.trip_stats.note_since_charge(km, kwh):
             self._schedule_trip_save()
 
-        snap = self._trip_snapshot(basic_status, charging_data)
+        snap = self._trip_snapshot(basic_status, charging_data, prefer_basic=prefer_basic)
         trip_kwargs = dict(
             capacity_kwh=self.resolve_battery_capacity_for(charging_data)[0],
             tank_litres=self.effective_fuel_tank_litres,
@@ -1937,9 +2014,17 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         charging_data = data.get("charging")
         return project_range_at_target(
             electric_range_km(
-                basic_status, charging_data, factor=DATA_DECIMAL_CORRECTION
+                basic_status, charging_data, factor=DATA_DECIMAL_CORRECTION,
+                prefer_basic=self.prefer_basic_measurements(charging_data, status),
             ),
-            self._extract_soc_pct(basic_status, charging_data),
+            self._extract_soc_pct(
+                basic_status, charging_data,
+                prefer_basic=self.prefer_basic_measurements(charging_data, status),
+                allow_basic_soc=(
+                    self.vehicle_type == "BEV"
+                    or self.backend_supports(Feature.STATE_OF_CHARGE_NON_BEV)
+                ),
+            ),
             self._target_soc_pct(charging_data),
         )
 
@@ -1980,7 +2065,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         _, used = self._extract_since_charge(charging_data)
         return ending - (used or 0.0)
 
-    def _charge_snapshot(self, basic_status, charging_data):
+    def _charge_snapshot(self, basic_status, charging_data, *, prefer_basic=False):
         """Build a ChargeSnapshot for the charge-session tracker, or None."""
         rcs = getattr(charging_data, "rvsChargeStatus", None) if charging_data else None
 
@@ -1988,15 +2073,29 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             value = getattr(rcs, name, None) if rcs is not None else None
             return float(value) if isinstance(value, (int, float)) and value > 0 else None
 
+        source_epoch = getattr(charging_data, "statusTime", None)
+        measured_at = (
+            datetime.fromtimestamp(source_epoch, tz=timezone.utc)
+            if source_epoch is not None and self._is_status_timestamp_valid(charging_data)
+            else datetime.now(timezone.utc)
+        )
         return ChargeSnapshot(
             record_start=_epoch("startTime"),
             record_end=_epoch("endTime"),
-            ts=datetime.now(timezone.utc).isoformat(),
-            soc_pct=self._extract_soc_pct(basic_status, charging_data),
+            ts=measured_at.isoformat(),
+            soc_pct=self._extract_soc_pct(
+                basic_status, charging_data,
+                prefer_basic=prefer_basic,
+                allow_basic_soc=(
+                    self.vehicle_type == "BEV"
+                    or self.backend_supports(Feature.STATE_OF_CHARGE_NON_BEV)
+                ),
+            ),
             pack_energy_kwh=self._extract_pack_energy_kwh(charging_data),
             odometer_km=self._extract_odometer_km(basic_status, charging_data),
             range_km=electric_range_km(
-                basic_status, charging_data, factor=DATA_DECIMAL_CORRECTION
+                basic_status, charging_data, factor=DATA_DECIMAL_CORRECTION,
+                prefer_basic=prefer_basic,
             ),
         )
 
@@ -2018,7 +2117,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         volts = raw_voltage * CHARGING_VOLTAGE_FACTOR
         return max(0.0, round(amps * volts / 1000.0, 3))
 
-    def _update_charge_state(self, basic_status, charging_data):
+    def _update_charge_state(self, basic_status, charging_data, *, prefer_basic=False):
         """Open/close a charging session so Last Charge Energy can report how
         much went IN — the API has no such field (#262, @HarryFlatter).
 
@@ -2045,7 +2144,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         gun_connected = bool(getattr(rcs, "chargingGunState", False)) if rcs else False
         charge, changed = self.trip_stats.note_charge_state(
             status in CHARGE_SESSION_STATUS_CODES,
-            self._charge_snapshot(basic_status, charging_data),
+            self._charge_snapshot(basic_status, charging_data, prefer_basic=prefer_basic),
             capacity_kwh=self.resolve_battery_capacity_for(charging_data)[0],
             now_iso=datetime.now(timezone.utc).isoformat(),
             is_plugged_in=gun_connected,
@@ -2104,7 +2203,10 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             # Trip open/close (#301) — evaluated every poll from power_mode, so
             # it's independent of the is_powered_on transition (which the 323
             # start-message hint pre-sets before this poll runs).
-            self._update_trip_state(power_mode, basic_status, charging_data)
+            self._update_trip_state(
+                power_mode, basic_status, charging_data,
+                prefer_basic=self.prefer_basic_measurements(charging_data, status_data),
+            )
 
             # Detect Power State
             # Track previous state so we catch the transition even if a prior
@@ -2145,6 +2247,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         self._update_charge_state(
             getattr(status_data, "basicVehicleStatus", None) if status_data else None,
             charging_data,
+            prefer_basic=self.prefer_basic_measurements(charging_data, status_data),
         )
 
         # A charging -> not-charging transition (charge complete, or the
@@ -2965,8 +3068,10 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
     @property
     def quiet_active(self) -> bool:
         """Quiet hours are on and Live Polling is off."""
-        return bool(getattr(self, "quiet_hours", False)) and not getattr(
-            self, "live_polling", True
+        return (
+            callable(getattr(self.client, "get_cached_vehicle_status", None))
+            and bool(getattr(self, "quiet_hours", False))
+            and not getattr(self, "live_polling", True)
         )
 
     @property
@@ -3216,7 +3321,8 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         """What the charger entity says now: True, False, or None (no entity
         or no usable state)."""
         entity_id = getattr(self, "quiet_charger_entity", None)
-        if not entity_id or not getattr(self, "quiet_hours", False):
+        if (not entity_id or not getattr(self, "quiet_hours", False)
+                or not callable(getattr(self.client, "get_cached_vehicle_status", None))):
             return None
         hass = getattr(self, "hass", None)
         state = hass.states.get(entity_id) if hass is not None else None
@@ -3230,7 +3336,8 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 unsub()
             setattr(self, name, None)
         entity_id = getattr(self, "quiet_charger_entity", None)
-        if not entity_id or not self.quiet_hours:
+        if (not entity_id or not self.quiet_hours
+                or not callable(getattr(self.client, "get_cached_vehicle_status", None))):
             return
         self._charger_unsub = async_track_state_change_event(
             self.hass, [entity_id], self._handle_charger_change
@@ -3308,7 +3415,14 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             lock = None
         return (
             plugged_in,
-            self._extract_soc_pct(basic, charging_data),
+            self._extract_soc_pct(
+                basic, charging_data,
+                prefer_basic=self.prefer_basic_measurements(charging_data, status),
+                allow_basic_soc=(
+                    self.vehicle_type == "BEV"
+                    or self.backend_supports(Feature.STATE_OF_CHARGE_NON_BEV)
+                ),
+            ),
             self._target_soc_pct(charging_data),
             lock,
         )
@@ -3335,7 +3449,14 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         remaining = remaining_charge_time(
             remaining_minutes=getattr(chrg, "chrgngRmnngTime", None),
             remaining_valid_flag=getattr(chrg, "chrgngRmnngTimeV", None),
-            soc_pct=self._extract_soc_pct(basic, charging_data),
+            soc_pct=self._extract_soc_pct(
+                basic, charging_data,
+                prefer_basic=self.prefer_basic_measurements(charging_data, status),
+                allow_basic_soc=(
+                    self.vehicle_type == "BEV"
+                    or self.backend_supports(Feature.STATE_OF_CHARGE_NON_BEV)
+                ),
+            ),
             target_pct=self._target_soc_pct(charging_data),
             capacity_kwh=self.resolve_battery_capacity_for(charging_data)[0],
             power_kw=self._pack_power_kw(chrg) if chrg is not None else None,
@@ -3732,7 +3853,9 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             return
         try:
             self._command_error_event_entity.record_command_error(
-                source, str(error)
+                source,
+                "India vehicle command failed; completion may be unknown"
+                if getattr(self.client, "region_name", None) == "India" else str(error),
             )
         except Exception as e:
             # The event entity is supplementary — never let a failure here
@@ -3832,6 +3955,11 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                     raise GenericResponseException(f"Generic {data_name} response.")
                 return data
             except (UpdateFailed, GenericResponseException, Exception) as e:
+                if isinstance(e, (ConfigEntryAuthFailed, ConfigEntryError)):
+                    raise
+                if india_login_rejection(e) is not None:
+                    from . import _raise_india_login_failure
+                    _raise_india_login_failure(e)
                 retries += 1
 
                 # Return code 4 = "can't reach the car". Previously only failed
@@ -3869,6 +3997,9 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                     try:
                         await self.client.login()
                     except Exception as login_exc:
+                        if india_login_rejection(login_exc) is not None:
+                            from . import _raise_india_login_failure
+                            _raise_india_login_failure(login_exc)
                         LOGGER.warning(
                             "Re-login failed for VIN %s: %s", self.vin, login_exc
                         )
@@ -3951,7 +4082,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
 
         try:
             status_dt = datetime.fromtimestamp(status_time, tz=timezone.utc)
-        except (ValueError, OSError, OverflowError) as e:
+        except (TypeError, ValueError, OSError, OverflowError) as e:
             LOGGER.warning(
                 "Vehicle status statusTime %s could not be parsed: %s — "
                 "treating response as untrustworthy.",

@@ -5,7 +5,7 @@
 # Copyright (c) 2026 John Lazarus. Licensed under the MIT License.
 from __future__ import annotations
 
-import time
+from contextlib import nullcontext
 from types import SimpleNamespace
 
 from aiohttp import ClientSession
@@ -83,27 +83,6 @@ _CHARGING_CURRENT_ZERO_A = 1000
 _BMS_CHRG_STS_UNPLUGGED = 0
 _BMS_CHRG_STS_CHARGING = 3
 _BMS_CHRG_STS_PLUGGED_IN = 7  # connected but not charging: paused or full
-
-# The Charging Duration sensor reads rvsChargeStatus.chargingDuration with
-# DATA_100_DECIMAL_CORRECTION and labels the result minutes, i.e. it expects
-# hundredths of a minute. The India client reports elapsed session time in
-# seconds, so convert instead of passing the seconds straight through.
-_SECONDS_PER_MINUTE = 60
-_CHARGING_DURATION_UNITS_PER_MINUTE = 100
-
-
-def _charging_duration_units(seconds: int | None) -> int | None:
-    """Convert elapsed seconds into the hundredths-of-a-minute the sensor decodes.
-
-    :param seconds: :attr:`~mg_ismart_india_client.models.ChargeStatus.charge_time_elapsed_s`.
-    :returns: the value for ``rvsChargeStatus.chargingDuration``, or ``None``.
-    """
-    if seconds is None:
-        return None
-    return round(
-        seconds / _SECONDS_PER_MINUTE * _CHARGING_DURATION_UNITS_PER_MINUTE
-    )
-
 
 def _last_charge_ending_power(charge) -> int | None:
     """What the pack held when the last charge ended, in tenths of a kWh.
@@ -208,7 +187,10 @@ def _looks_electric(vehicle) -> bool:
 
 
 class IndiaBackend:
-    """Backend for MG India vehicles (TAP binary protocol)."""
+    """India TAP backend. Runtime injects the account lock for commands;
+    poll/setup callers hold that same lock around complete read operations.
+    Direct callers without an injected lock must serialize all operations.
+    """
 
     supported_features = INDIA_FEATURES
 
@@ -223,9 +205,17 @@ class IndiaBackend:
         self._client: MgIndiaClient | None = None
         self._charge_status_by_vin = {}
         self._electric_vins = set()
-        self._seat_levels = {"front_left": 0, "front_right": 0}
+        self._seat_levels = {}
+        self._api_lock = None
+        self._closed = False
+
+    def set_api_lock(self, lock):
+        """Reuse the account transport lock; polling holds it at the cycle boundary."""
+        self._api_lock = lock
 
     async def _ensure_client(self) -> MgIndiaClient:
+        if self._closed:
+            raise MgIndiaApiError("India account session is closed")
         if self._client is not None:
             return self._client
         self._session = ClientSession()
@@ -248,10 +238,13 @@ class IndiaBackend:
         await (await self._ensure_client()).login()
 
     async def close(self):
+        self._closed = True
         if self._session is not None:
             await self._session.close()
             self._session = None
         self._client = None
+        self._charge_status_by_vin.clear()
+        self._seat_levels.clear()
 
     async def get_vehicle_info(self):
         client = await self._ensure_client()
@@ -265,12 +258,13 @@ class IndiaBackend:
 
     async def get_vehicle_status(self, vin: str | None = None):
         self._set_vin(vin)
-        self._charge_status_by_vin.pop(self.vin, None)
+        operation_vin = self.vin
+        self._charge_status_by_vin.pop(operation_vin, None)
         status = await (await self._ensure_client()).status(
-            include_charge=self.vin in self._electric_vins
+            include_charge=operation_vin in self._electric_vins
         )
-        self._charge_status_by_vin[self.vin] = status.charge
-        return self._map_status(status)
+        self._charge_status_by_vin[operation_vin] = status.charge
+        return self._map_status(status, operation_vin)
 
     def _map_vehicle(self, vehicle):
         model_name = (
@@ -305,15 +299,8 @@ class IndiaBackend:
             raw=getattr(vehicle, "raw", None),
         )
 
-    def _map_status(self, status):
-        raw_timestamp = getattr(status, "status_time", None)
-        if raw_timestamp is None:
-            LOGGER.debug(
-                "MG India status payload missing status_time; using local receipt time"
-            )
-            timestamp = int(time.time())
-        else:
-            timestamp = raw_timestamp
+    def _map_status(self, status, vin=None):
+        timestamp = getattr(status, "status_time", None)
         range_tenths = _tenths(getattr(status, "range_km", None))
         basic = _ns(
             lockStatus=_lock_flag(getattr(status, "locked", None)),
@@ -346,17 +333,18 @@ class IndiaBackend:
             canBusActive=_flag(getattr(status, "can_bus_active", None)),
             timeOfLastCANBUSActivity=getattr(status, "last_can_activity", None),
             handBrake=_flag(getattr(status, "handbrake", None)),
-            powerMode=_raw_basic(status, "powerMode", 0),
-            engineStatus=_raw_basic(status, "engineStatus", 0),
-            dippedBeamStatus=_raw_basic(status, "dippedBeamStatus", 0),
-            mainBeamStatus=_raw_basic(status, "mainBeamStatus", 0),
+            powerMode=getattr(status, "power_mode_raw", _raw_basic(status, "powerMode")),
+            engineStatus=getattr(status, "engine_status_raw", _raw_basic(status, "engineStatus")),
+            sideLightStatus=getattr(status, "side_lights_on", _raw_basic(status, "sideLightStatus")),
+            dippedBeamStatus=getattr(status, "dipped_beam_on", _raw_basic(status, "dippedBeamStatus")),
+            mainBeamStatus=getattr(status, "main_beam_on", _raw_basic(status, "mainBeamStatus")),
             frontLeftTyrePressure=_tyre_pressure(status, "front_left_tyre_psi"),
             frontRightTyrePressure=_tyre_pressure(status, "front_right_tyre_psi"),
             rearLeftTyrePressure=_tyre_pressure(status, "rear_left_tyre_psi"),
             rearRightTyrePressure=_tyre_pressure(status, "rear_right_tyre_psi"),
             wheelTyreMonitorStatus=getattr(status, "tyre_monitor_status", None),
-            frontLeftSeatHeatLevel=_raw_basic(status, "frontLeftSeatHeatLevel", 0),
-            frontRightSeatHeatLevel=_raw_basic(status, "frontRightSeatHeatLevel", 0),
+            frontLeftSeatHeatLevel=getattr(status, "front_left_seat_heat_level", _raw_basic(status, "frontLeftSeatHeatLevel")),
+            frontRightSeatHeatLevel=getattr(status, "front_right_seat_heat_level", _raw_basic(status, "frontRightSeatHeatLevel")),
             secondRowLeftSeatHeatLevel=_raw_basic(
                 status, "secondRowLeftSeatHeatLevel", 0
             ),
@@ -365,13 +353,14 @@ class IndiaBackend:
             ),
             rmtHtdRrWndSt=_raw_basic(status, "rmtHtdRrWndSt", 0),
         )
+        seat_levels = self._seat_levels.setdefault(vin or self.vin, {"front_left": 0, "front_right": 0})
         for seat_key, attr in (
             ("front_left", "frontLeftSeatHeatLevel"),
             ("front_right", "frontRightSeatHeatLevel"),
         ):
             level = getattr(basic, attr, None)
             if level is not None:
-                self._seat_levels[seat_key] = int(level)
+                seat_levels[seat_key] = int(level)
 
         return _ns(
             statusTime=timestamp,
@@ -381,48 +370,57 @@ class IndiaBackend:
         )
 
     async def lock_vehicle(self, vin):
-        self._set_vin(vin)
-        await (await self._ensure_client()).control_door_lock(True)
+        async with self._api_lock or nullcontext():
+            self._set_vin(vin)
+            await (await self._ensure_client()).control_door_lock(True)
 
     async def unlock_vehicle(self, vin):
-        self._set_vin(vin)
-        await (await self._ensure_client()).control_door_lock(False)
+        async with self._api_lock or nullcontext():
+            self._set_vin(vin)
+            await (await self._ensure_client()).control_door_lock(False)
 
     async def open_tailgate(self, vin):
-        self._set_vin(vin)
-        await (await self._ensure_client()).release_tailgate()
+        async with self._api_lock or nullcontext():
+            self._set_vin(vin)
+            await (await self._ensure_client()).release_tailgate()
 
     async def control_windows(self, vin, action):
-        self._set_vin(vin)
-        action = str(action or "").lower()
-        if action == "ventilate":
-            raise MgIndiaApiError("ventilate not confirmed for India")
-        if action == "open":
-            await (await self._ensure_client()).control_windows(True, (9, 10, 11, 12))
-            return
-        if action == "close":
-            await (await self._ensure_client()).control_windows(False, (9, 10, 11, 12))
-            return
-        raise MgIndiaApiError(f"Unsupported India window action: {action}")
+        async with self._api_lock or nullcontext():
+            self._set_vin(vin)
+            action = str(action or "").lower()
+            if action == "ventilate":
+                raise MgIndiaApiError("ventilate not confirmed for India")
+            if action == "open":
+                await (await self._ensure_client()).control_windows(True, (9, 10, 11, 12))
+                return
+            if action == "close":
+                await (await self._ensure_client()).control_windows(False, (9, 10, 11, 12))
+                return
+            raise MgIndiaApiError(f"Unsupported India window action: {action}")
 
     async def control_sunroof(self, vin, action):
-        self._set_vin(vin)
-        action = str(action or "").lower()
-        if action not in {"open", "close"}:
-            raise MgIndiaApiError(f"Unsupported India sunroof action: {action}")
-        await (await self._ensure_client()).control_sunroof(action == "open")
+        async with self._api_lock or nullcontext():
+            self._set_vin(vin)
+            action = str(action or "").lower()
+            if action not in {"open", "close"}:
+                raise MgIndiaApiError(f"Unsupported India sunroof action: {action}")
+            await (await self._ensure_client()).control_sunroof(action == "open")
 
     async def start_ac(self, vin, temperature_idx=None):
-        self._set_vin(vin)
-        await (await self._ensure_client()).control_climate(True)
+        async with self._api_lock or nullcontext():
+            if temperature_idx is not None:
+                raise MgIndiaApiError("India climate supports on/off only")
+            self._set_vin(vin)
+            await (await self._ensure_client()).control_climate(True)
 
     async def start_climate(self, vin, temperature_idx, fan_speed, ac_on):
-        self._set_vin(vin)
-        await (await self._ensure_client()).control_climate(True)
+        async with self._api_lock or nullcontext():
+            raise MgIndiaApiError("Parameterized India climate control is unsupported")
 
     async def stop_ac(self, vin):
-        self._set_vin(vin)
-        await (await self._ensure_client()).control_climate(False)
+        async with self._api_lock or nullcontext():
+            self._set_vin(vin)
+            await (await self._ensure_client()).control_climate(False)
 
     async def get_charging_info(self, vin):
         """Map the India EV charging status onto the ``chrgMgmtData`` /
@@ -457,8 +455,7 @@ class IndiaBackend:
         :returns: a namespace carrying ``chrgMgmtData`` and ``rvsChargeStatus``,
             or ``None`` when the status poll did not receive a charging frame.
         """
-        self._set_vin(vin)
-        charge = self._charge_status_by_vin.pop(self.vin, None)
+        charge = self._charge_status_by_vin.pop(vin, None)
         if charge is None:
             return None
         if charge.is_charging:
@@ -483,7 +480,7 @@ class IndiaBackend:
             fuelRangeElec=_tenths(charge.range_km),
             mileage=_tenths(charge.odometer_km),
             chargingGunState=charge.is_plugged_in,
-            chargingDuration=_charging_duration_units(charge.charge_time_elapsed_s),
+            chargingDuration=charge.charge_time_elapsed_s,
             totalBatteryCapacity=_tenths(charge.total_battery_capacity_kwh),
             mileageSinceLastCharge=_tenths(charge.distance_since_last_charge_km),
             # Ours, not the car's: neither packEnergyKwh nor
@@ -503,36 +500,39 @@ class IndiaBackend:
             ),
             lastChargeEndingPower=_last_charge_ending_power(charge),
         )
-        return _ns(chrgMgmtData=chrg_mgmt, rvsChargeStatus=rvs)
+        return _ns(statusTime=charge.status_time, chrgMgmtData=chrg_mgmt, rvsChargeStatus=rvs)
 
     async def control_heated_seat(self, vin, seat, level):
-        self._set_vin(vin)
-        if seat not in self._seat_levels:
-            raise MgIndiaApiError(
-                f"India heated-seat control is not confirmed for {seat}"
+        async with self._api_lock or nullcontext():
+            self._set_vin(vin)
+            levels = dict(self._seat_levels.get(vin, {"front_left": 0, "front_right": 0}))
+            if seat not in levels:
+                raise MgIndiaApiError("India heated-seat control is unsupported for this seat")
+            levels[seat] = int(level)
+            await (await self._ensure_client()).control_heated_seats(
+                levels["front_left"], levels["front_right"]
             )
-        self._seat_levels[seat] = int(level)
-        await (await self._ensure_client()).control_heated_seats(
-            self._seat_levels["front_left"], self._seat_levels["front_right"]
-        )
+            self._seat_levels[vin] = levels
 
     async def control_heated_seats(self, vin, left_side_level=0, right_side_level=0):
-        self._set_vin(vin)
-        self._seat_levels["front_left"] = int(left_side_level)
-        self._seat_levels["front_right"] = int(right_side_level)
-        await (await self._ensure_client()).control_heated_seats(
-            self._seat_levels["front_left"], self._seat_levels["front_right"]
-        )
+        async with self._api_lock or nullcontext():
+            self._set_vin(vin)
+            left, right = int(left_side_level), int(right_side_level)
+            await (await self._ensure_client()).control_heated_seats(left, right)
+            self._seat_levels[vin] = {"front_left": left, "front_right": right}
 
     async def trigger_alarm(
         self, vin, with_horn=True, with_lights=True, should_stop=False
     ):
-        self._set_vin(vin)
-        if should_stop:
-            LOGGER.debug(
-                "MG India find-my-car stop requested for VIN %s; "
-                "no stop command is exposed by the TAP client",
-                vin,
-            )
-            return None
-        await (await self._ensure_client()).find_my_car()
+        async with self._api_lock or nullcontext():
+            self._set_vin(vin)
+            if should_stop:
+                LOGGER.debug(
+                    "MG India find-my-car stop requested for VIN %s; "
+                    "no stop command is exposed by the TAP client",
+                    vin,
+                )
+                raise MgIndiaApiError("Stopping India find-my-car is unsupported")
+            if not with_horn or not with_lights:
+                raise MgIndiaApiError("Parameterized India find-my-car is unsupported")
+            await (await self._ensure_client()).find_my_car()

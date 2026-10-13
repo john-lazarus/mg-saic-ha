@@ -1706,7 +1706,16 @@ class SAICMGElectricRangeSensor(CoordinatorEntity, SensorEntity):
             self.coordinator, "reliable_fuel_range_elec", True
         )
 
-        if reliable_fuel_range:
+        charging_data = self.coordinator.data.get("charging")
+        if self.coordinator.prefer_basic_measurements(charging_data):
+            # Keep the charge frame for its independent telemetry; only its
+            # overlapping range is older than the ordinary measurement.
+            status_data = self.coordinator.data.get("status")
+            basic_status_data = getattr(status_data, self._status_type, None)
+            raw_value = getattr(basic_status_data, self._field, None)
+            if raw_value is not None and raw_value > 0:
+                electric_range = raw_value * self._factor
+        if electric_range is None and reliable_fuel_range:
             # Standard path: try fuelRangeElec from RvsChargeStatus first
             charging_data = self.coordinator.data.get("charging")
             if charging_data:
@@ -1715,7 +1724,7 @@ class SAICMGElectricRangeSensor(CoordinatorEntity, SensorEntity):
                 )
                 if charging_status_data:
                     raw_value = getattr(charging_status_data, self._field, None)
-                    if raw_value not in (None, 0, -128):
+                    if raw_value is not None and raw_value > 0:
                         electric_range = raw_value * self._factor
 
             # Then try fuelRangeElec from basicVehicleStatus
@@ -1725,7 +1734,7 @@ class SAICMGElectricRangeSensor(CoordinatorEntity, SensorEntity):
                     basic_status_data = getattr(status_data, self._status_type, None)
                     if basic_status_data:
                         raw_value = getattr(basic_status_data, self._field, None)
-                        if raw_value not in (None, 0, -128):
+                        if raw_value is not None and raw_value > 0:
                             electric_range = raw_value * self._factor
 
             # Last resort for reliable models: bmsEstdElecRng as a secondary source
@@ -1735,7 +1744,7 @@ class SAICMGElectricRangeSensor(CoordinatorEntity, SensorEntity):
                     chrg_mgmt = getattr(charging_data, "chrgMgmtData", None)
                     if chrg_mgmt:
                         raw_estd = getattr(chrg_mgmt, "bmsEstdElecRng", None)
-                        if raw_estd not in (None, 0, -128):
+                        if raw_estd is not None and raw_estd > 0:
                             electric_range = float(raw_estd)
                             LOGGER.debug(
                                 "Electric range sensor %s: bmsEstdElecRng fallback "
@@ -1743,7 +1752,7 @@ class SAICMGElectricRangeSensor(CoordinatorEntity, SensorEntity):
                                 self._name,
                                 electric_range,
                             )
-        else:
+        elif electric_range is None:
             # Unreliable-fuelRangeElec path (e.g. AS33P / MG HS PHEV):
             # Use imcuVehElecRng — the live vehicle electric range that tracks SOC.
             # Do NOT use bmsEstdElecRng here; that is the fixed full-charge estimate
@@ -1753,7 +1762,7 @@ class SAICMGElectricRangeSensor(CoordinatorEntity, SensorEntity):
                 chrg_mgmt = getattr(charging_data, "chrgMgmtData", None)
                 if chrg_mgmt:
                     raw_live = getattr(chrg_mgmt, "imcuVehElecRng", None)
-                    if raw_live not in (None, 0, -128):
+                    if raw_live is not None and raw_live > 0:
                         electric_range = float(raw_live)
                         LOGGER.debug(
                             "Electric range sensor %s: using imcuVehElecRng "
@@ -1780,7 +1789,7 @@ class SAICMGElectricRangeSensor(CoordinatorEntity, SensorEntity):
                     if basic_status_data
                     else None
                 )
-                if raw_status not in (None, 0, -128):
+                if raw_status is not None and raw_status > 0:
                     electric_range = raw_status * self._factor
                     LOGGER.debug(
                         "Electric range sensor %s: no charging data, using "
@@ -2015,6 +2024,19 @@ class SAICMGSOCSensor(CoordinatorEntity, SensorEntity):
     def native_value(self):
         # First, try to get SOC from charging data (bmsPackSOCDsp)
         charging = self.coordinator.data.get("charging")
+        basic_soc = getattr(
+            getattr(self.coordinator.data.get("status"), self._status_type, None),
+            self._field_basic, None,
+        )
+        if (
+            self.coordinator.prefer_basic_measurements(charging)
+            and basic_soc is not None and 0 <= basic_soc <= 100
+            and (
+                self.coordinator.vehicle_type == "BEV"
+                or self.coordinator.backend_supports(Feature.STATE_OF_CHARGE_NON_BEV)
+            )
+        ):
+            charging = None
         soc = None
         if charging:
             charging_data = getattr(charging, "chrgMgmtData", None)
@@ -2023,26 +2045,26 @@ class SAICMGSOCSensor(CoordinatorEntity, SensorEntity):
                 if soc is not None:
                     # -128 is the SAIC sentinel for "no valid data" — reject it
                     # before applying the decimal factor (which would produce -12.8).
-                    # 0 is also treated as suspect here: on this raw, unscaled
-                    # bmsPackSOCDsp field a genuine near-empty pack still reports
-                    # a small positive value in practice, so an exact 0 has only
-                    # been observed as a stale/unpopulated reading rather than a
-                    # real 0% SoC. Falling back to basicVehicleStatus.extendedData1
-                    # below is safe even for a truly near-empty battery, since that
-                    # field independently tracks SoC as a truncated whole percent.
-                    if soc in (-128, 0):
+                    # The global producer's exact-zero readings are suspect.
+                    # India charge SOC includes valid zero; retain it.
+                    if not 0 <= soc <= 1000 or (
+                        soc == 0 and getattr(self.coordinator.client, "region_name", None) != "India"
+                    ):
                         soc = None
                     else:
                         soc = soc * DATA_DECIMAL_CORRECTION_SOC
 
         # If SOC is None or invalid, try to get from basic vehicle status
-        if soc is None:
+        if soc is None and (
+            self.coordinator.vehicle_type == "BEV"
+            or self.coordinator.backend_supports(Feature.STATE_OF_CHARGE_NON_BEV)
+        ):
             status = self.coordinator.data.get("status")
             if status:
                 status_data = getattr(status, self._status_type, None)
                 if status_data:
                     soc = getattr(status_data, self._field_basic, None)
-                    if soc in (-128, -1):
+                    if soc is not None and not 0 <= soc <= 100:
                         soc = None
 
         if soc is not None:
@@ -3790,7 +3812,14 @@ class SAICMGBatteryEnergySensor(CoordinatorEntity, SensorEntity):
         # Efficiency Since Charge permanently Unknown on every car (#262).
         status = (self.coordinator.data or {}).get("status")
         basic_status = getattr(status, "basicVehicleStatus", None)
-        soc = self.coordinator._extract_soc_pct(basic_status, charging_data)
+        soc = self.coordinator._extract_soc_pct(
+            basic_status, charging_data,
+            prefer_basic=self.coordinator.prefer_basic_measurements(charging_data, status),
+            allow_basic_soc=(
+                self.coordinator.vehicle_type == "BEV"
+                or self.coordinator.backend_supports(Feature.STATE_OF_CHARGE_NON_BEV)
+            ),
+        )
         capacity = self.coordinator.effective_battery_capacity_kwh
         if soc is not None and capacity:
             self._source = "estimated"
@@ -4444,7 +4473,14 @@ class SAICMGEfficiencySinceResetSensor(CoordinatorEntity, SensorEntity):
         status = self.coordinator.data.get("status")
         basic_status = getattr(status, "basicVehicleStatus", None)
         charging = self.coordinator.data.get("charging")
-        current_soc = self.coordinator._extract_soc_pct(basic_status, charging)
+        current_soc = self.coordinator._extract_soc_pct(
+            basic_status, charging,
+            prefer_basic=self.coordinator.prefer_basic_measurements(charging, status),
+            allow_basic_soc=(
+                self.coordinator.vehicle_type == "BEV"
+                or self.coordinator.backend_supports(Feature.STATE_OF_CHARGE_NON_BEV)
+            ),
+        )
         current_odometer = self.coordinator._extract_odometer_km(basic_status, charging)
         return compute_soc_since_reset_efficiency(
             baseline.get("soc_pct"),

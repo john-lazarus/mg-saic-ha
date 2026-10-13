@@ -109,3 +109,22 @@ def is_session_expired(error) -> bool:
     # above is authoritative, and a bare search could match an unrelated
     # number (an event id containing 401, say).
     return library_error is None and "401" in text
+
+
+def india_login_rejection(error):
+    """Return a terminal India login verdict, including through HA wrappers.
+
+    The type lives in client.py in the pinned 0.2.0 release. Import lazily to
+    keep global error handling independent of the India package.
+    """
+    try:
+        from mg_ismart_india_client.client import MgIndiaLoginRejected
+    except ImportError:
+        return None
+    depth = 0
+    while isinstance(error, BaseException) and depth < _MAX_CAUSE_DEPTH:
+        if isinstance(error, MgIndiaLoginRejected):
+            return error
+        error = error.__cause__ or error.__context__
+        depth += 1
+    return None

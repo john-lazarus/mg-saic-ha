@@ -3,6 +3,7 @@
 from datetime import time
 
 from homeassistant.components.time import TimeEntity
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
@@ -167,8 +168,10 @@ class SAICMGBatteryHeatingScheduleTime(CoordinatorEntity, TimeEntity):
                 await self.coordinator.async_request_refresh()
             except CommandsLimitReachedException:
                 await self.coordinator.notify_command_limit_reached(self._vin)
+                raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
             except VehicleNotLockedException:
                 await self.coordinator.notify_vehicle_not_locked(self._vin)
+                raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
             except Exception as e:
                 LOGGER.error(
                     "Error updating battery heating schedule time for VIN %s: %s",
@@ -178,6 +181,7 @@ class SAICMGBatteryHeatingScheduleTime(CoordinatorEntity, TimeEntity):
                 self.coordinator.record_command_error(
                     "Error updating battery heating schedule time", e
                 )
+                raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
         else:
             # Schedule disabled — just reflect the pending value in the UI.
             self.async_write_ha_state()

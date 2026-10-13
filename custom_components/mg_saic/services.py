@@ -1,5 +1,6 @@
 # File: services.py
 
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
 from homeassistant.helpers import config_validation as cv
 from homeassistant.util import dt as dt_util
@@ -72,7 +73,7 @@ SERVICE_REAR_WINDOW_DEFROST_ACTION_SCHEMA = vol.Schema(
 SERVICE_START_AC_SCHEMA = vol.Schema(
     {
         vol.Required("vin"): cv.string,
-        vol.Required("temperature"): vol.Coerce(float),
+        vol.Optional("temperature"): vol.Coerce(float),
     }
 )
 
@@ -142,8 +143,8 @@ def _record_command_error(hass: HomeAssistant, vin: str, source: str, error) -> 
     """Record a service-call command failure on the vehicle's coordinator.
 
     Service handlers assign `coordinator` inside their try block, so it may be
-    unbound in the except block — this re-resolves it safely. Best-effort and
-    never raises, so it can't mask the original error.
+    unbound in the except block — this re-resolves it safely. Recording is
+    best-effort, then a privacy-safe HA error is raised.
 
     This is what feeds the Vehicle Reachability sensor: without it, commands
     issued via SERVICE CALLS never flagged a return-code-4 failure, so the
@@ -172,10 +173,11 @@ def _record_command_error(hass: HomeAssistant, vin: str, source: str, error) -> 
             coordinator.record_command_error(source, error)
     except Exception:  # noqa: BLE001 - supplementary, must never break the caller
         pass
+    raise HomeAssistantError("MG vehicle command failed; completion may be unknown") from None
 
 
 def _backend_allows(client, vin: str, feature: Feature, service: str) -> bool:
-    """Return True if *vin*'s backend supports *feature*, else log and refuse.
+    """Return True if *vin*'s backend supports *feature*, else raise a safe HA error.
 
     Service calls can target any configured VIN, including vehicles on
     backends that do not implement the requested command family (e.g. MG
@@ -192,7 +194,7 @@ def _backend_allows(client, vin: str, feature: Feature, service: str) -> bool:
         vin,
         feature.value,
     )
-    return False
+    raise HomeAssistantError("Requested control is unsupported for this region") from None
 
 
 async def async_setup_services(hass: HomeAssistant) -> None:
@@ -263,9 +265,14 @@ async def async_setup_services(hass: HomeAssistant) -> None:
 
             # Retrieve desired temperature from service call
             temperature = call.data.get("temperature")
-            if temperature is None:
-                LOGGER.error("No temperature provided for start_ac service.")
+            if getattr(client, "region_name", None) == "India":
+                if temperature is not None:
+                    raise HomeAssistantError("India climate supports on/off only")
+                await client.start_ac(vin)
+                await coordinator.schedule_action_refresh(vin, immediate_interval, long_interval)
                 return
+            if temperature is None:
+                raise HomeAssistantError("Temperature is required for this region")
 
             # Clamp the temperature within allowable range
             clamped_temp = max(
@@ -425,6 +432,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             )
         except Exception as e:
             LOGGER.error(f"Error starting charging for VIN {vin}: {e}")
+            _record_command_error(hass, vin, "service.starting_charging", e)
 
     async def handle_stop_charging(call: ServiceCall) -> None:
         """Handle the stop_charging service call."""
@@ -446,6 +454,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             )
         except Exception as e:
             LOGGER.error(f"Error stopping charging for VIN {vin}: {e}")
+            _record_command_error(hass, vin, "service.stopping_charging", e)
 
     async def handle_start_battery_heating(call: ServiceCall) -> None:
         """Handle the start_battery_heating service call."""
@@ -467,6 +476,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             )
         except Exception as e:
             LOGGER.error(f"Error starting battery heating for VIN {vin}: {e}")
+            _record_command_error(hass, vin, "service.starting_battery_heating", e)
 
     async def handle_stop_battery_heating(call: ServiceCall) -> None:
         """Handle the stop_battery_heating service call."""
@@ -488,6 +498,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             )
         except Exception as e:
             LOGGER.error(f"Error stopping battery heating for VIN {vin}: {e}")
+            _record_command_error(hass, vin, "service.stopping_battery_heating", e)
 
     async def handle_set_battery_heating_schedule(call: ServiceCall) -> None:
         """Handle the set_battery_heating_schedule service call."""
@@ -515,7 +526,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
                         "no start_time provided and no previous schedule known.",
                         vin,
                     )
-                    return
+                    raise HomeAssistantError("Battery heating schedule requires a start time")
                 coordinator.battery_heating_pending_time = start_time
                 LOGGER.debug(
                     "Enabling battery heating schedule for VIN %s at %s",
@@ -538,6 +549,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             LOGGER.error(
                 "Error setting battery heating schedule for VIN %s: %s", vin, e
             )
+            _record_command_error(hass, vin, "service.setting_battery_heating_schedule", e)
 
     async def handle_set_scheduled_charging(call: ServiceCall) -> None:
         """Handle the set_scheduled_charging service call."""
@@ -622,21 +634,21 @@ async def async_setup_services(hass: HomeAssistant) -> None:
                 LOGGER.error(
                     "No charging data available to set charging current limit."
                 )
-                return
+                raise HomeAssistantError("Charging data is unavailable")
 
             chrg_mgmt_data = getattr(charging_data, "chrgMgmtData", None)
             if not chrg_mgmt_data:
                 LOGGER.error(
                     "No charging management data available to set charging current limit."
                 )
-                return
+                raise HomeAssistantError("Charging management data is unavailable")
 
             target_soc_value = getattr(chrg_mgmt_data, "bmsOnBdChrgTrgtSOCDspCmd", None)
             if target_soc_value is None:
                 LOGGER.error(
                     "Target SOC value is not available to set charging current limit."
                 )
-                return
+                raise HomeAssistantError("Target SOC is unavailable")
 
             # Map the target_soc_value to BatterySoc enum
             target_soc_enum = {
@@ -667,6 +679,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             )
         except Exception as e:
             LOGGER.error("Failed to set charging current limit for VIN %s: %s", vin, e)
+            _record_command_error(hass, vin, "service.setting_charging_current", e)
 
     async def handle_set_target_soc(call: ServiceCall) -> None:
         """Handle the set_target_soc service call."""

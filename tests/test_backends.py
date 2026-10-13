@@ -335,7 +335,7 @@ class TestIndiaBackendAdapter(unittest.TestCase):
         self.assertEqual(charging.chrgMgmtData.chrgngRmnngTime, 186)
         self.assertEqual(charging.rvsChargeStatus.fuelRangeElec, 852)
         self.assertEqual(charging.rvsChargeStatus.mileage, 12345)
-        self.assertEqual(charging.rvsChargeStatus.chargingDuration, 150)
+        self.assertEqual(charging.rvsChargeStatus.chargingDuration, 90)
         self.assertEqual(charging.rvsChargeStatus.totalBatteryCapacity, 508)
         self.assertEqual(charging.rvsChargeStatus.mileageSinceLastCharge, 456)
         # Real kWh, taken as-is rather than reconstructed (#302).
@@ -452,6 +452,7 @@ class FakeIndiaClient:
         self.calls = []
         self.status_include_charge = None
         self.charge = types.SimpleNamespace(
+            status_time=1_799_999_900,
             is_charging=True,
             is_plugged_in=True,
             charging_voltage=360.0,

@@ -9,10 +9,12 @@ from homeassistant.config_entries import (
     ConfigEntryNotReady,
 )
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryError
 
 from saic_ismart_client_ng.exceptions import SaicLogoutException
 
 from .backends import Feature, backend_supports, create_backend
+from .errors import india_login_rejection
 from .coordinator import SAICMGDataUpdateCoordinator
 from .message_poller import SAICMGAccountPoller
 from .const import DOMAIN, LOGGER, PLATFORMS
@@ -173,6 +175,23 @@ def _is_auth_failure(exc: BaseException) -> bool:
     return any(marker in message for marker in _AUTH_FAILURE_MARKERS)
 
 
+def _raise_india_login_failure(exc):
+    rejection = india_login_rejection(exc)
+    if rejection is None:
+        if isinstance(exc, (ConfigEntryAuthFailed, ConfigEntryError)):
+            raise exc from None
+        return
+    if _is_auth_failure(rejection):
+        raise ConfigEntryAuthFailed(
+            "MG India rejected the stored credentials; reauthenticate."
+        ) from None
+    # An explicit terminal verdict (including quota) is not a connection error.
+    # Without a proven code table, do not invent a cooldown or label it bad credentials.
+    raise ConfigEntryError(
+        "MG India rejected login; automatic login attempts stopped."
+    ) from None
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up MG SAIC from a config entry.
 
@@ -196,10 +215,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
         return False
     in_progress.add(entry.entry_id)
+    setup_ok = False
     try:
-        return await _async_setup_entry_impl(hass, entry)
+        setup_ok = await _async_setup_entry_impl(hass, entry)
+        return setup_ok
     finally:
         in_progress.discard(entry.entry_id)
+        if not setup_ok:
+            await _async_release_entry_resources(hass, entry)
 
 
 async def _async_setup_entry_impl(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -250,8 +273,23 @@ async def _async_setup_entry_impl(hass: HomeAssistant, entry: ConfigEntry) -> bo
             # other region gets the global REST client constructed exactly
             # as before (see backends/__init__.py).
             client = create_backend(entry.data)
+            if entry.data.get("region") == "India":
+                client.set_api_lock(api_lock)
             try:
-                await client.login()
+                async with api_lock:
+                    try:
+                        await client.login()
+                    except BaseException:
+                        # The local client has no account owner yet. Finish
+                        # closing it even if setup is cancelled again, without
+                        # replacing the original login failure/cancellation.
+                        close_task = asyncio.create_task(client.close())
+                        while not close_task.done():
+                            with suppress(Exception, asyncio.CancelledError):
+                                await asyncio.shield(close_task)
+                        with suppress(Exception, asyncio.CancelledError):
+                            close_task.result()
+                        raise
             except Exception as exc:
                 # Do NOT log the account key, VIN, or raw backend response at
                 # error level (issue #234): the account key contains the
@@ -260,24 +298,17 @@ async def _async_setup_entry_impl(hass: HomeAssistant, entry: ConfigEntry) -> bo
                 # chained onto ConfigEntryNotReady below, so a full traceback
                 # remains available when debug logging is enabled.
                 LOGGER.error(
-                    "Failed to log in to MG SAIC for account %s (VIN %s). "
-                    "Home Assistant will retry automatically.",
+                    "Failed to log in to MG SAIC for account %s (VIN %s).",
                     _mask_account(acct_key),
                     _mask_vin(vin),
                 )
                 LOGGER.debug("MG SAIC login failure detail", exc_info=exc)
-                # Release any client-held resources (issue #233): the India
-                # backend owns an aiohttp.ClientSession, and the global client
-                # owns an httpx.AsyncClient — both would otherwise leak and
-                # emit "Unclosed client session" warnings on every failed
-                # setup.
-                with suppress(Exception):
-                    await client.close()
                 # If this is a genuine credential rejection, ask Home Assistant
                 # to start the re-authentication flow so the user can enter the
                 # new password in place (issue #250) instead of retrying the
                 # stale one forever.  Transient failures stay ConfigEntryNotReady
                 # and are retried automatically as before.
+                _raise_india_login_failure(exc)
                 if _is_clock_skew(exc):
                     LOGGER.error(
                         "MG SAIC rejected the request because this machine's "
@@ -292,6 +323,8 @@ async def _async_setup_entry_impl(hass: HomeAssistant, entry: ConfigEntry) -> bo
                         "MG SAIC rejected the stored credentials; please "
                         "re-enter your password."
                     ) from exc
+                if entry.data.get("region") == "India":
+                    raise ConfigEntryNotReady("Could not connect to MG India; HA will retry.") from None
                 raise ConfigEntryNotReady(
                     "Could not log in to MG SAIC; Home Assistant will retry "
                     "automatically."
@@ -311,7 +344,8 @@ async def _async_setup_entry_impl(hass: HomeAssistant, entry: ConfigEntry) -> bo
         return False
 
     try:
-        vehicles = await client.get_vehicle_info()
+        async with api_lock:
+            vehicles = await client.get_vehicle_info()
         # A transient SAIC server error (e.g. HTTP 500 on /vehicle/list) can
         # return None or an empty list rather than raising. Treat that as
         # "not ready yet" and let HA retry with backoff, rather than a
@@ -327,15 +361,19 @@ async def _async_setup_entry_impl(hass: HomeAssistant, entry: ConfigEntry) -> bo
         if not any(v.vin == vin for v in vehicles):
             LOGGER.error("VIN %s not found in account vehicles", vin)
             return False
-    except ConfigEntryNotReady:
+    except ConfigEntryNotReady as exc:
+        _raise_india_login_failure(exc)
         # Propagate so HA schedules an automatic retry.
         raise
     except Exception as exc:
         # Any other error verifying the VIN (network blip, transient API
         # failure) is also treated as "not ready" so HA retries rather than
         # permanently failing setup.
+        _raise_india_login_failure(exc)
+        if entry.data.get("region") == "India":
+            raise ConfigEntryNotReady("Could not verify the configured vehicle yet") from None
         raise ConfigEntryNotReady(
-            f"Could not verify VIN {vin} yet: {exc}"
+            "Could not verify the configured vehicle yet"
         ) from exc
 
     # Store a reference to the shared client under this entry's key so that
@@ -346,6 +384,7 @@ async def _async_setup_entry_impl(hass: HomeAssistant, entry: ConfigEntry) -> bo
     # ── Build and wire up the coordinator ────────────────────────────────────
     coordinator = SAICMGDataUpdateCoordinator(hass, client, entry)
     coordinator.set_api_lock(api_lock)
+    domain[f"{entry.entry_id}_coordinator"] = coordinator
 
     # If this is a second (or later) VIN on the same account, stagger startup
     # by a few seconds so both coordinators don't race to hit the SAIC API
@@ -366,10 +405,12 @@ async def _async_setup_entry_impl(hass: HomeAssistant, entry: ConfigEntry) -> bo
 
     try:
         await coordinator.async_setup()
-    except ConfigEntryNotReady:
+    except ConfigEntryNotReady as exc:
+        _raise_india_login_failure(exc)
         # Propagate so HA marks the entry as "Retrying" and retries automatically.
         raise
     except Exception as exc:
+        _raise_india_login_failure(exc)
         LOGGER.error("Coordinator setup failed for VIN %s: %s", vin, exc)
         return False
 
@@ -506,63 +547,48 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if not unload_ok:
         return False
 
-    domain = hass.data[DOMAIN]
+    await _async_release_entry_resources(hass, entry)
+    return True
+
+
+async def _async_release_entry_resources(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Release entry resources and close the account when its final owner leaves."""
+    domain = hass.data.get(DOMAIN, {})
     vin = entry.data.get("vin")
     acct_key = _account_key(entry)
-
-    # ── Coordinator shutdown ──────────────────────────────────────────────────
     coordinator = domain.pop(f"{entry.entry_id}_coordinator", None)
-    # Remove the per-entry client reference (it's a shared object; don't close it yet)
-    domain.pop(entry.entry_id, None)
-
-    if vin:
+    client = domain.pop(entry.entry_id, None)
+    if vin and domain.get("clients_by_vin", {}).get(vin) is client:
         domain.get("clients_by_vin", {}).pop(vin, None)
+    if vin and domain.get("coordinators_by_vin", {}).get(vin) is coordinator:
         domain.get("coordinators_by_vin", {}).pop(vin, None)
-
     if coordinator is not None:
         await coordinator.async_shutdown()
-
-    # ── Poller VIN deregistration ─────────────────────────────────────────────
     poller = domain.get("account_pollers", {}).get(acct_key)
     if poller is not None and vin:
         poller.unregister_coordinator(vin)
-        LOGGER.debug(
-            "VIN %s unregistered from AccountPoller %s (%d remaining)",
-            vin,
-            acct_key,
-            len(poller._coordinators),
-        )
-        if not poller.has_coordinators:
-            LOGGER.info(
-                "Last VIN unloaded for account %s — stopping AccountPoller and closing session",
-                acct_key,
+
+    login_lock = domain.get("account_login_locks", {}).get(acct_key)
+    api_lock = domain.get("account_locks", {}).get(acct_key)
+    if login_lock is not None and api_lock is not None:
+        async with login_lock:
+            owners = any(
+                _account_key(e) == acct_key
+                and (e.entry_id in domain or e.entry_id in domain.get("setups_in_progress", set()))
+                for e in hass.config_entries.async_entries(DOMAIN)
             )
-            await poller.async_stop()
-            domain["account_pollers"].pop(acct_key, None)
-            domain["account_locks"].pop(acct_key, None)
-            domain["account_login_locks"].pop(acct_key, None)
-
-            # Close the shared client session only when the last VIN is gone
-            shared_client = domain.get("account_clients", {}).pop(acct_key, None)
-            if shared_client is not None:
-                with suppress(Exception):
-                    await shared_client.close()
-
-    # ── Global cleanup when no entries remain ─────────────────────────────────
-    if not domain.get("clients_by_vin"):
-        await async_unload_services(hass)
-        for key in (
-            "clients_by_vin",
-            "coordinators_by_vin",
-            "account_clients",
-            "account_pollers",
-            "account_locks",
-            "account_login_locks",
-            "services_registered",
-        ):
-            domain.pop(key, None)
-
-    if not domain:
-        hass.data.pop(DOMAIN, None)
-
-    return True
+            if not owners:
+                poller = domain.get("account_pollers", {}).pop(acct_key, None)
+                if poller is not None:
+                    await poller.async_stop()
+                async with api_lock:
+                    shared_client = domain.get("account_clients", {}).pop(acct_key, None)
+                    if shared_client is not None:
+                        with suppress(Exception):
+                            await shared_client.close()
+    # Keep the existing lock objects: a queued setup/command may still own a
+    # reference. Clearing them would let another operation use a different lock.
+    if not domain.get("clients_by_vin") and not domain.get("setups_in_progress"):
+        if domain.get("services_registered"):
+            await async_unload_services(hass)
+            domain["services_registered"] = False

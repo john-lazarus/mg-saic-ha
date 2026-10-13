@@ -199,6 +199,8 @@ class IndiaBEVStateOfChargeTests(unittest.TestCase):
             has_steering_wheel_heat=False,
             supports_charging_current_limit=False,
             supports_target_soc=False,
+            # These fixtures have no independently newer ordinary timestamp.
+            prefer_basic_measurements=lambda _charging: False,
         )
         # Mirror the coordinator's central capacity resolution (override >
         # profile > API > derived, placeholder rejected). These stubs have no
