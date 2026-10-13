@@ -422,7 +422,7 @@
           "abrp_api_key": "Saisissez votre propre clé API Iternio, créée dans le portail développeur Iternio — voir {abrp_doc_url}. Requise avec le jeton utilisateur pour activer ABRP.",
           "has_rear_heated_seats": "Ajoute un interrupteur marche/arrêt et un capteur d'état pour chaque siège arrière. Nécessite aussi Possède des sièges chauffants.",
           "quiet_hours": "Ajoute Quiet Charging, Quiet Charging Start et Quiet Charging End à l'appareil. Entre ces heures, véhicule éteint, l'intégration lit la copie de l'état conservée par SAIC au lieu de réveiller le véhicule, avec une interrogation réelle au début d'une charge et une autre lorsqu'elle devrait être terminée.",
-          "quiet_charging_charger_entity": "Choisissez le capteur d'état de votre chargeur (par exemple un zappi, Ohme ou Pod Point). Quand Quiet Charging est actif, le véhicule est interrogé dès que le chargeur commence à charger, puis une fois arrêté depuis 2 minutes, au lieu d'être déduit de l'état conservé par SAIC. Il compte comme en charge quand il indique « on » ou « charging ». Laissez vide si vous n'en avez pas."
+          "quiet_charging_charger_entity": "Choisissez le capteur d'état de votre chargeur (par exemple le Plug status d'un zappi, ou l'état d'un Ohme ou Pod Point), ou un input_boolean que votre propre automatisation active pendant la charge. Quand Quiet Charging est actif, le véhicule est interrogé dès que le chargeur commence à charger, puis une fois arrêté depuis 2 minutes, au lieu d'être déduit de l'état conservé par SAIC. Il compte comme en charge quand il indique « on » ou « charging ». Laissez vide si vous n'en avez pas."
         }
       }
     },

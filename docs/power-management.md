@@ -120,7 +120,7 @@ They only go unavailable if the car has never answered the charging request sinc
 
 To stop using it altogether, untick **Quiet charging** in Configure: the three controls go and polling is normal all the time. The switch only overrides the times for now.
 
-**Using your charger (recommended)** *(from 1.4.0-beta7)*: in Configure, **Quiet charging: charger status** lets you pick your charger's status sensor from the usual searchable list (sensors and binary sensors; you can also type or paste an entity ID). A zappi, Ohme or Pod Point status sensor works as it is: it counts as charging when it reads `on` or `charging`, in any capitalisation. For anything else, make a template binary sensor that is on while charging and pick that.
+**Using your charger (recommended)** *(from 1.4.0-beta7)*: in Configure, **Quiet charging: charger status** lets you pick your charger's status sensor from the usual searchable list (sensors, binary sensors and input_boolean helpers; you can also type or paste an entity ID). A zappi **Plug status**, Ohme or Pod Point status sensor works as it is: it counts as charging when it reads `on` or `charging`, in any capitalisation. (On a zappi, use **Plug status**, not **Status**: Status shows the zappi's mode, such as Boosting, which can show before the car actually starts.) For anything else, pick a template binary sensor that is on while charging, or an input_boolean that an automation turns on and off.
 
 The car never tells SAIC when it starts charging, and on an MG HS PHEV every live poll during a charge turns the lights on. With a charger picked:
 

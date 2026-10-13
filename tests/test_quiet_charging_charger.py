@@ -230,6 +230,26 @@ class WatchingTests(unittest.TestCase):
         old.assert_called_once()
 
 
+class PickerTests(unittest.TestCase):
+    def test_offers_sensors_binary_sensors_and_input_booleans(self):
+        # The selector is stubbed under the harness, so check the source.
+        from pathlib import Path
+
+        source = (
+            Path(__file__).resolve().parents[1] / "custom_components" / "mg_saic" / "config_flow.py"
+        ).read_text()
+        self.assertIn(
+            'EntitySelectorConfig(domain=["sensor", "binary_sensor", "input_boolean"])',
+            source,
+        )
+
+    def test_an_input_boolean_set_by_an_automation_works(self):
+        c = _coordinator("on", entity="input_boolean.car_charging")
+        self.assertTrue(c._charger_charging())
+        _run(c._handle_charger_change(_event("off", "on")))
+        c.async_request_refresh.assert_awaited_once()
+
+
 class OptionsFormTests(unittest.TestCase):
     def _save(self, saved, entered):
         flow = CF.SAICMGOptionsFlowHandler.__new__(CF.SAICMGOptionsFlowHandler)

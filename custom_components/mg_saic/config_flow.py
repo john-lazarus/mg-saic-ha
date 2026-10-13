@@ -107,8 +107,10 @@ except Exception:  # noqa: BLE001 - any import failure means "no selector here"
 
 
 # The charger status picker for Quiet charging: Home Assistant's own
-# searchable entity drop-down, sensors and binary sensors only. Typing or
-# pasting an entity id into it works too. Plain text under the test harness.
+# searchable entity drop-down -- sensors, binary sensors, and input_boolean
+# helpers (for an automation that works out "charging" from several of the
+# charger's sensors and sets one on and off). Typing or pasting an entity id
+# works too. Plain text under the test harness.
 try:  # pragma: no cover - exercised at runtime, shimmed under tests
     from homeassistant.helpers.selector import (
         EntitySelector,
@@ -116,7 +118,7 @@ try:  # pragma: no cover - exercised at runtime, shimmed under tests
     )
 
     CHARGER_ENTITY_SELECTOR = EntitySelector(
-        EntitySelectorConfig(domain=["sensor", "binary_sensor"])
+        EntitySelectorConfig(domain=["sensor", "binary_sensor", "input_boolean"])
     )
 except Exception:  # noqa: BLE001 - any import failure means "no selector here"
     CHARGER_ENTITY_SELECTOR = str
