@@ -30,6 +30,9 @@ from .logic import (
     odometer_km,
     resolve_battery_capacity,
     select_update_interval,
+    charging_data_for_controls,
+    status_charging_flag,
+    status_says_not_charging,
 )
 from .trip_stats import TripStatsManager, TripSnapshot, ChargeSnapshot
 from .cached_status import summarise_cached_status
@@ -45,6 +48,7 @@ from .quiet_hours import (
     DEFAULT_QUIET_HOURS_START,
     charger_says_charging,
     finish_check_delay,
+    full_at_recent_reading,
     format_hhmm,
     in_quiet_window,
     live_polling_after_restart,
@@ -248,6 +252,9 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # The last charging reply the car gave, for the charging controls
         # while the car isn't answering that request (#419).
         self.last_charging_data = None
+        # Seen the status's charging flag at 1 during a charge on this car,
+        # so its 0 can be believed when the charging data is missing (#269).
+        self._charging_flag_seen = False
         self._last_command_unreachable = False
         self._last_command_unreachable_time = None
         # Debounce for the code-4 'unreachable' signal: only flag after this many
@@ -2102,6 +2109,34 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         except Exception as e:  # noqa: BLE001 - persistence must never break a poll
             LOGGER.debug("Trip save scheduling failed for VIN %s: %s", self.vin, e)
 
+    @property
+    def charging_stopped_per_status(self) -> bool:
+        """No charging data this poll, but the car's status says it isn't
+        charging (see logic.status_says_not_charging)."""
+        data = getattr(self, "data", None) or {}
+        if data.get("charging") is not None:
+            return False
+        return status_says_not_charging(
+            data.get("status"),
+            flag_trusted=getattr(self, "_charging_flag_seen", False),
+        )
+
+    def _note_charging_flag(self, status_data, charging_data) -> None:
+        """Learn whether this car's status charging flag can be believed:
+        seen at 1 while the charging data says charging."""
+        if self.is_charging and status_charging_flag(status_data) == 1:
+            if not getattr(self, "_charging_flag_seen", False):
+                LOGGER.debug("VIN %s: status charging flag confirmed", self.vin)
+            self._charging_flag_seen = True
+        elif charging_data is None and status_says_not_charging(
+            status_data, flag_trusted=getattr(self, "_charging_flag_seen", False)
+        ):
+            LOGGER.debug(
+                "No charging data for VIN %s, but the car's status says it isn't "
+                "charging: charging power, current and status show not charging",
+                self.vin,
+            )
+
     def _update_state(self, data):
         """Update state variables based on fetched data."""
         status_data = data.get("status")
@@ -2159,6 +2194,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 self.is_charging = (
                     getattr(chrg_mgmt_data, "bmsChrgSts", None) in CHARGING_STATUS_CODES
                 )
+        self._note_charging_flag(status_data, charging_data)
 
         # Charge-session tracking for Last Charge Energy (#262). Runs before
         # the transition handling below because it needs the raw charging data
@@ -3287,6 +3323,14 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 return
             if self.is_charging:
                 return
+            if self._full_at_recent_reading():
+                LOGGER.info(
+                    "Quiet charging: %s says charging, but VIN %s was full at "
+                    "the last reading; no poll",
+                    self.quiet_charger_entity,
+                    self.vin,
+                )
+                return
             LOGGER.info(
                 "Quiet charging: %s says charging; one live poll for VIN %s",
                 self.quiet_charger_entity,
@@ -3308,12 +3352,36 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             return
         if not self.quiet_active or self.is_powered_on:
             return
+        if self._full_at_recent_reading():
+            LOGGER.debug(
+                "Quiet charging: %s stopped charging; VIN %s was already full, "
+                "no poll",
+                self.quiet_charger_entity,
+                self.vin,
+            )
+            return
         LOGGER.info(
             "Quiet charging: %s stopped charging; one live poll for VIN %s",
             self.quiet_charger_entity,
             self.vin,
         )
         await self.async_request_refresh()
+
+    def _full_at_recent_reading(self) -> bool:
+        """Was the battery full (at its target) at a live reading under
+        FULL_READING_MAX_AGE old? Then a charger saying "charging" is a blip,
+        not a charge worth a poll."""
+        data = getattr(self, "data", None) or {}
+        status = data.get("status")
+        basic = getattr(status, "basicVehicleStatus", None) if status else None
+        soc = self._extract_soc_pct(basic, data.get("charging"))
+        reading = getattr(self, "_last_status_time", None)
+        if soc is None or reading is None:
+            return False
+        target = self._target_soc_pct(charging_data_for_controls(self))
+        if soc < target:
+            return False
+        return full_at_recent_reading(soc, target, reading, utcnow().timestamp())
 
     def _quiet_charge_context(self):
         """From the last live poll: plugged in?, battery %, target %, lock."""

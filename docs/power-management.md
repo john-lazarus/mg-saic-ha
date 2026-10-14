@@ -88,6 +88,14 @@ Use it to gate charging automations — for example, only act on Charging Power 
 - **Charging** and **Battery Heating** stay usable but read unknown, because whether the car is charging (or heating) right now isn't known.
 
 They only go unavailable if the car has never answered the charging request since Home Assistant started.
+
+**When the car's status says it has stopped** *(from 1.4.0-beta9)*: the outage often starts at the end of a charge (#269: an HS PHEV from 04:07 until the next morning). The car's vehicle status still answers, and on the HS PHEV, MG4 and MGS6 it carries a charging flag. Once that flag has been seen during a charge on your car, and it says the car isn't charging:
+
+- **Charging Power**, **Charging Current**, **Charging Voltage** and **Remaining Charging Time** read 0, instead of the charge's last figures.
+- **Charging Status** reads `Not Charging` (whether the charge finished, stopped or the car was unplugged isn't known).
+- The **Charging** switch reads off.
+
+**Charging Duration** and the since-charge figures keep the last charge's values. If the flag says the car is still charging, everything holds its last values as before.
  
 > **Current isn't the same as right:** the state says whether the figures are *current*. If SAIC returns a successful response containing bad values, it reads `live`. The one known case — the car resetting its since-charge counters without a charge — is handled separately, and shows up in the `counter_reset_held` attributes above. See [Charging figures reset to 0 without a charge](troubleshooting.md#charging-figures-reset-to-0-without-a-charge).
  
@@ -129,6 +137,7 @@ The car never tells SAIC when it starts charging, and on an MG HS PHEV every liv
 - **The predicted "has it finished?" check** is held back while the charger still says charging.
 - **SAIC's stored status** is then only a fallback, used while the charger's entity is unavailable.
 - A charger coming back from unavailable, or Home Assistant restarting, mid-charge doesn't count as a start, so it doesn't cost a poll.
+- **The car was already full** *(from 1.4.0-beta9)*: if a live reading less than 2 hours old found the battery at its target (100% if it has none), the charger saying "charging" doesn't cost a poll, and nor does the stop after it. A zappi can show "Charging" for a minute after a charge has finished (#269: at 04:36, half an hour after an HS PHEV reached 100%).
 
 **While Quiet Charging is on and the car is switched off:**
 

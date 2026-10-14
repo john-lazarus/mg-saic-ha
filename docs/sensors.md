@@ -460,7 +460,7 @@ This section lists every possible state for every status and control entity, so 
 | Entity | Possible states |
 |---|---|
 | Power Mode | `Off`, `Accessory`, `On`, `Start` |
-| Charging Status | `Unplugged`, `Charging (AC)`, `Charging Finished`, `Charging`, `Fault Charging`, `Connecting`, `Unrecognized Connection`, `Plugged In`, `Charging Stopped`, `Scheduled Charging`, `Charging (DC)`, `Super Offboard Charging`, `V2X Discharging` |
+| Charging Status | `Unplugged`, `Charging (AC)`, `Charging Finished`, `Charging`, `Fault Charging`, `Connecting`, `Unrecognized Connection`, `Plugged In`, `Charging Stopped`, `Scheduled Charging`, `Charging (DC)`, `Super Offboard Charging`, `V2X Discharging`, `Not Charging` *(the charging data is missing and the car's status says it isn't charging; from 1.4.0-beta9)* |
 | Battery Heating Status | `Off`, `On`, `Error` |
 | Front Left/Right Heated Seat Level | `Off`, `Low`, `Medium`, `High` |
 | Rear Left/Right Heated Seat Status | `On`, `Off` *(the rear seats have no levels — on/off only, in the app and in the car)* |
