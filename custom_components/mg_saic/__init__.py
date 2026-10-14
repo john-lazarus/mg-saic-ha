@@ -370,8 +370,17 @@ async def _async_setup_entry_impl(hass: HomeAssistant, entry: ConfigEntry) -> bo
         # Propagate so HA marks the entry as "Retrying" and retries automatically.
         raise
     except Exception as exc:
-        LOGGER.error("Coordinator setup failed for VIN %s: %s", vin, exc)
-        return False
+        # Anything unexpected: let Home Assistant retry rather than leave the
+        # entry failed until a manual reload (#425).
+        LOGGER.error(
+            "Coordinator setup failed for VIN %s: %s — Home Assistant will retry",
+            _mask_vin(vin),
+            exc,
+        )
+        raise ConfigEntryNotReady(
+            f"Coordinator setup failed: {exc} — Home Assistant will retry "
+            "automatically."
+        ) from exc
 
     domain[f"{entry.entry_id}_coordinator"] = coordinator
     domain["clients_by_vin"][vin] = client
