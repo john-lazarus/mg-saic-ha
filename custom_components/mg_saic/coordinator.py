@@ -118,6 +118,7 @@ from .const import (
     RETRY_LIMIT,
     STARTUP_API_TIMEOUT,
     STARTUP_CHARGING_TIMEOUT,
+    STARTUP_STATUS_TIMEOUT,
     RUNTIME_CHARGING_TIMEOUT,
     STATUS_TIMESTAMP_FUTURE_TOLERANCE,
     STATUS_TIMESTAMP_MAX_AGE,
@@ -1370,11 +1371,31 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             # with, causing all cars on the account to show the same data.
             vin = self.vin
             try:
-                data["status"] = await self._fetch_with_retries(
+                status_fetch = self._fetch_with_retries(
                     lambda: self.client.get_vehicle_status(vin),
                     self._is_generic_response_vehicle_status,
                     "vehicle status",
                 )
+                if self.is_initial_setup:
+                    # Don't let a sleeping car use up the whole startup
+                    # allowance (#425): carry on without its status.
+                    try:
+                        data["status"] = await asyncio.wait_for(
+                            status_fetch, timeout=STARTUP_STATUS_TIMEOUT
+                        )
+                    except asyncio.TimeoutError:
+                        LOGGER.warning(
+                            "VIN %s didn't answer within %ss at startup (likely "
+                            "asleep) — finishing setup without its status; it "
+                            "will be fetched at the next scheduled update",
+                            self.vin,
+                            STARTUP_STATUS_TIMEOUT,
+                        )
+                        data["status"] = None
+                        # Charging data comes from the same car: skip it too.
+                        self._gave_up_car_asleep = True
+                else:
+                    data["status"] = await status_fetch
                 # _fetch_with_retries returns None once its retries are
                 # exhausted rather than raising, so the cycle still "succeeds"
                 # -- Data Freshness must say failed, not cached (#262: two
@@ -3808,6 +3829,10 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         row). A one-off code 4 mid-drive, a user refresh and an event-driven
         refresh all keep the full retries.
         """
+        # At startup a car that isn't answering is asleep for all we know:
+        # one attempt, so setup isn't held up by retries (#425).
+        if getattr(self, "is_initial_setup", False):
+            return True
         return self._scheduled_refresh and self._last_command_unreachable
 
     async def _fetch_with_retries(self, fetch_func, is_generic_func, data_name):

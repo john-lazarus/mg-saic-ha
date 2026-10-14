@@ -1398,6 +1398,14 @@ STARTUP_API_TIMEOUT = 30
 # populate on the next scheduled refresh. This keeps one slow endpoint from
 # eating the whole STARTUP_API_TIMEOUT budget.
 STARTUP_CHARGING_TIMEOUT = 12
+# How long the first refresh waits for the car's status before carrying on
+# without it (#425). A car that's asleep doesn't answer, and SAIC keeps
+# trying it for about 30 s per request (@SteveMSJ's log, 10 Oct: 09:13:00 to
+# 09:13:30), so waiting for it used up the whole STARTUP_API_TIMEOUT and
+# setup failed every time until the car woke. The vehicle list comes from
+# SAIC's server, so setup can always finish without the car. Leaves room in
+# the 30 s for the vehicle list and the charging request.
+STARTUP_STATUS_TIMEOUT = 15
 
 # On routine (non-startup) refreshes, cap the charging-info fetch too. The
 # charging endpoint can fail for long stretches independently of everything
