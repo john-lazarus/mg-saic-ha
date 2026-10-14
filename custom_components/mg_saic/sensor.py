@@ -47,6 +47,20 @@ from .utils import create_device_info
 from .trip_stats import compute_since_charge_efficiency, compute_soc_since_reset_efficiency
 
 
+def _stopped_per_status(coordinator):
+    """No charging data, but the car's status says it isn't charging (#269).
+
+    Checked with ``is True`` so a stand-in coordinator never counts.
+    """
+    return getattr(coordinator, "charging_stopped_per_status", False) is True
+
+
+# Shown by Charging Status when the charging data is missing and the car's
+# status says it isn't charging: whether it finished, stopped or was
+# unplugged isn't known.
+NOT_CHARGING_STATUS = "Not Charging"
+
+
 async def async_setup_entry(hass, entry, async_add_entities):
     """Set up MG SAIC sensors."""
     coordinator = hass.data[DOMAIN][f"{entry.entry_id}_coordinator"]
@@ -2190,6 +2204,9 @@ class SAICMGChargingCurrentSensor(CoordinatorEntity, SensorEntity):
                     return calculated_value
                 else:
                     return None
+            elif _stopped_per_status(self.coordinator):
+                self._last_valid_current = 0
+                return 0
             else:
                 LOGGER.debug("No charging data available for %s", self._name)
 
@@ -2333,6 +2350,9 @@ class SAICMGChargingPowerSensor(CoordinatorEntity, SensorEntity):
                     return power
                 else:
                     return None
+            elif _stopped_per_status(self.coordinator):
+                self._last_valid_power = 0
+                return 0
             else:
                 LOGGER.debug("No charging data available for %s", self._name)
 
@@ -2406,6 +2426,12 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
     # _NOT_CHARGING_ZERO_FIELDS above should return 0 explicitly.
     # V2X_DISCHARGING (13) is deliberately absent — it has live current/voltage data.
     _INACTIVE_CHARGING_STATUSES = frozenset({0, 5})
+    # Live figures that read 0 when the charging data is missing but the
+    # car's status says it isn't charging (#269). The last charge's duration
+    # and energy are left showing: they describe that charge, not now.
+    _STOPPED_PER_STATUS_ZERO_FIELDS = frozenset(
+        {"bmsPackVol", "bmsPackCrnt", "bmsChrgOtptCrntReq", "chrgngRmnngTime"}
+    )
 
     # Fields whose companion "V" field says whether the value is live. A
     # capture taken mid-charge with current flowing showed V=0 on
@@ -2714,6 +2740,13 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
                         return result
                     # raw_value is None — fall through to retention below
 
+            elif _stopped_per_status(self.coordinator) and (
+                self._field in self._STOPPED_PER_STATUS_ZERO_FIELDS
+                or self._field == "bmsChrgSts"
+            ):
+                value = NOT_CHARGING_STATUS if self._field == "bmsChrgSts" else 0
+                self._last_valid_value = value
+                return value
             else:
                 LOGGER.debug("No charging data available for %s", self._name)
 

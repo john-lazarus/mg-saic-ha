@@ -71,6 +71,12 @@ CONF_QUIET_CHARGER_ENTITY = "quiet_charging_charger_entity"
 # a charger's brief pauses (a zappi's one-minute "Waiting for EV") don't
 # each cost a poll.
 CHARGER_STOP_SETTLE = timedelta(minutes=2)
+# A charger saying "charging" when the car was full at a live reading this
+# recent doesn't cost a poll, and nor does the stop after it. @HarryFlatter's
+# HS PHEV, 14 Oct 2026: his zappi said "Charging" for about a minute at 04:36,
+# half an hour after the 04:07 poll had found the car at 100%, and the start
+# and stop polls that followed could each have flashed the lights.
+FULL_READING_MAX_AGE = timedelta(hours=2)
 # The Live Polling switch's state, and when it was last set (ISO, UTC), so it
 # survives a restart.
 CONF_QUIET_HOURS_LIVE_POLLING = "quiet_hours_live_polling"
@@ -341,6 +347,23 @@ def remaining_charge_time(
     if left_pct <= 0:
         return timedelta(0)
     return timedelta(hours=left_pct / 100.0 * capacity_kwh / power_kw)
+
+
+def full_at_recent_reading(
+    soc_pct: Optional[float],
+    target_pct: Optional[float],
+    reading_epoch: Optional[int],
+    now_epoch: float,
+) -> bool:
+    """True when the last live reading, under FULL_READING_MAX_AGE old,
+    found the battery at or above its target (100% with no target)."""
+    if soc_pct is None or reading_epoch is None:
+        return False
+    if soc_pct < (target_pct if target_pct is not None else 100.0):
+        return False
+    age = now_epoch - reading_epoch
+    # A few minutes the other way allows for the car's clock.
+    return -300 <= age <= FULL_READING_MAX_AGE.total_seconds()
 
 
 def finish_check_delay(remaining: Optional[timedelta]) -> timedelta:

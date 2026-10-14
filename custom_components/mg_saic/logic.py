@@ -25,6 +25,33 @@ def charging_data_for_controls(coordinator):
     return getattr(coordinator, "last_charging_data", None)
 
 
+def status_charging_flag(status):
+    """The live status's "charging now" flag (extendedData2: 1/0), or None."""
+    basic = getattr(status, "basicVehicleStatus", None) if status is not None else None
+    flag = getattr(basic, "extendedData2", None) if basic is not None else None
+    if isinstance(flag, bool) or not isinstance(flag, int) or flag not in (0, 1):
+        return None
+    return flag
+
+
+def status_says_not_charging(status, *, flag_trusted):
+    """True when the car's status says it isn't charging.
+
+    For when the charging request fails but the status still answers
+    (#269, @HarryFlatter's HS PHEV, 14 Oct 2026: return code 4 on every
+    charging request from the end of a charge at 04:07 on, while the status
+    worked). Without this, Charging Power and Current kept showing the
+    charge's last 6.24 kW and 15.75 A all morning.
+
+    The status's extendedData2 is 1 while charging and 0 otherwise on the HS
+    PHEV, MG4 and MGS6. It lags a little at the start of a charge (an MG4
+    showed 0 on the first poll of a charge), so 0 is only believed once the
+    flag has been seen at 1 during a charge on this car (``flag_trusted``),
+    and only when the charging data is missing.
+    """
+    return bool(flag_trusted) and status_charging_flag(status) == 0
+
+
 def normalize_sunroof_action(action):
     """Normalize a sunroof action to `(should_open, action_name)`."""
     if isinstance(action, bool):

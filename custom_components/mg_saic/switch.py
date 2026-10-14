@@ -481,10 +481,13 @@ class SAICMGChargingSwitch(CoordinatorEntity, SwitchEntity):
 
         Unknown (None) when the latest poll got no charging data, rather than
         the last answer: whether it is charging is a live state. The switch
-        stays usable (#419).
+        stays usable (#419). Off when the car's status says it isn't
+        charging (#269).
         """
         charging_data = self.coordinator.data.get("charging")
         if charging_data is None:
+            if getattr(self.coordinator, "charging_stopped_per_status", False) is True:
+                return False
             return None
         if charging_data:
             chrgMgmtData = getattr(charging_data, "chrgMgmtData", None)
