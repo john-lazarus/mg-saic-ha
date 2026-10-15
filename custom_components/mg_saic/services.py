@@ -6,6 +6,7 @@ from homeassistant.util import dt as dt_util
 import voluptuous as vol
 
 from .backends import Feature, backend_supports
+from .errors import is_india_backend, raise_india_command_error
 from .api import CommandsLimitReachedException, VehicleNotLockedException
 from .logic import charging_data_for_controls
 from .const import (
@@ -76,6 +77,10 @@ SERVICE_START_AC_SCHEMA = vol.Schema(
     }
 )
 
+SERVICE_START_AC_ADMISSION_SCHEMA = vol.Schema(
+    {vol.Required("vin"): cv.string, vol.Optional("temperature"): vol.Coerce(float)}
+)
+
 SERVICE_START_CLIMATE_SCHEMA = None
 
 SERVICE_SET_CHARGING_CURRENT_LIMIT_SCHEMA = vol.Schema(
@@ -138,12 +143,12 @@ def _get_vehicle_resources(hass: HomeAssistant, vin: str):
     return client, coordinator
 
 
-def _record_command_error(hass: HomeAssistant, vin: str, source: str, error) -> None:
+def _record_command_error(hass: HomeAssistant, vin: str, source: str, error, *, client=None) -> None:
     """Record a service-call command failure on the vehicle's coordinator.
 
     Service handlers assign `coordinator` inside their try block, so it may be
     unbound in the except block — this re-resolves it safely. Best-effort and
-    never raises, so it can't mask the original error.
+    global callers retain catch/return; India raises a sanitized HA error after recording.
 
     This is what feeds the Vehicle Reachability sensor: without it, commands
     issued via SERVICE CALLS never flagged a return-code-4 failure, so the
@@ -172,6 +177,8 @@ def _record_command_error(hass: HomeAssistant, vin: str, source: str, error) -> 
             coordinator.record_command_error(source, error)
     except Exception:  # noqa: BLE001 - supplementary, must never break the caller
         pass
+    client = client or hass.data.get(DOMAIN, {}).get("clients_by_vin", {}).get(vin)
+    raise_india_command_error(client, error)
 
 
 def _backend_allows(client, vin: str, feature: Feature, service: str) -> bool:
@@ -192,6 +199,7 @@ def _backend_allows(client, vin: str, feature: Feature, service: str) -> bool:
         vin,
         feature.value,
     )
+    raise_india_command_error(client, ValueError("Unsupported India service"))
     return False
 
 
@@ -209,9 +217,15 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         }
     )
 
+    def validate_start_ac(data):
+        admitted = SERVICE_START_AC_ADMISSION_SCHEMA(data)
+        client = hass.data.get(DOMAIN, {}).get("clients_by_vin", {}).get(admitted["vin"])
+        return admitted if is_india_backend(client) else SERVICE_START_AC_SCHEMA(data)
+
     async def handle_lock_vehicle(call: ServiceCall) -> None:
         """Handle the lock_vehicle service call."""
         vin = call.data["vin"]
+        client = None
         try:
             client, coordinator = _get_vehicle_resources(hass, vin)
             if not _backend_allows(client, vin, Feature.LOCK, "lock_vehicle"):
@@ -228,11 +242,13 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             )
         except Exception as e:
             LOGGER.error("Error locking vehicle for VIN %s: %s", vin, e)
-            _record_command_error(hass, vin, "service.locking_vehicle", e)
+            _record_command_error(hass, vin, "service.locking_vehicle", e, client=client)
+
 
     async def handle_unlock_vehicle(call: ServiceCall) -> None:
         """Handle the unlock_vehicle service call."""
         vin = call.data["vin"]
+        client = None
         try:
             client, coordinator = _get_vehicle_resources(hass, vin)
             if not _backend_allows(client, vin, Feature.LOCK, "unlock_vehicle"):
@@ -249,17 +265,26 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             )
         except Exception as e:
             LOGGER.error("Error unlocking vehicle for VIN %s: %s", vin, e)
-            _record_command_error(hass, vin, "service.unlocking_vehicle", e)
+            _record_command_error(hass, vin, "service.unlocking_vehicle", e, client=client)
+
 
     async def handle_start_ac(call: ServiceCall) -> None:
         """Handle the start_ac service call."""
         vin = call.data["vin"]
+        client = None
         try:
             client, coordinator = _get_vehicle_resources(hass, vin)
             if not _backend_allows(client, vin, Feature.CLIMATE, "start_ac"):
                 return
             immediate_interval = coordinator.after_action_delay
             long_interval = coordinator.ac_long_interval
+
+            if is_india_backend(client):
+                if "temperature" in call.data:
+                    raise ValueError("India climate does not support temperature settings")
+                await client.start_ac(vin)
+                await coordinator.schedule_action_refresh(vin, immediate_interval, long_interval)
+                return
 
             # Retrieve desired temperature from service call
             temperature = call.data.get("temperature")
@@ -293,11 +318,13 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             )
         except Exception as e:
             LOGGER.error("Error starting AC for VIN %s: %s", vin, e)
-            _record_command_error(hass, vin, "service.starting_ac", e)
+            _record_command_error(hass, vin, "service.starting_ac", e, client=client)
+
 
     async def handle_stop_ac(call: ServiceCall) -> None:
         """Handle the stop_ac service call."""
         vin = call.data["vin"]
+        client = None
         try:
             client, coordinator = _get_vehicle_resources(hass, vin)
             if not _backend_allows(client, vin, Feature.CLIMATE, "stop_ac"):
@@ -314,7 +341,8 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             )
         except Exception as e:
             LOGGER.error("Error stopping AC for VIN %s: %s", vin, e)
-            _record_command_error(hass, vin, "service.stopping_ac", e)
+            _record_command_error(hass, vin, "service.stopping_ac", e, client=client)
+
 
     async def handle_start_climate(call: ServiceCall) -> None:
         """Handle the start_climate service call."""
@@ -322,6 +350,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         temperature = call.data["temperature"]
         fan_speed = call.data["fan_speed"]
         ac_on = call.data["ac_on"]
+        client = None
         try:
             client, coordinator = _get_vehicle_resources(hass, vin)
             if not _backend_allows(client, vin, Feature.CLIMATE, "start_climate"):
@@ -362,11 +391,13 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             )
         except Exception as e:
             LOGGER.error("Error starting AC with settings for VIN %s: %s", vin, e)
-            _record_command_error(hass, vin, "service.starting_ac_with_settings", e)
+            _record_command_error(hass, vin, "service.starting_ac_with_settings", e, client=client)
+
 
     async def handle_open_tailgate(call: ServiceCall) -> None:
         """Handle the open_tailgate service call."""
         vin = call.data["vin"]
+        client = None
         try:
             client, coordinator = _get_vehicle_resources(hass, vin)
             if not _backend_allows(client, vin, Feature.TAILGATE, "open_tailgate"):
@@ -383,11 +414,13 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             )
         except Exception as e:
             LOGGER.error("Error opening tailgate for VIN %s: %s", vin, e)
-            _record_command_error(hass, vin, "service.opening_tailgate", e)
+            _record_command_error(hass, vin, "service.opening_tailgate", e, client=client)
+
 
     async def handle_trigger_alarm(call: ServiceCall) -> None:
         """Handle the trigger_alarm service call."""
         vin = call.data["vin"]
+        client = None
         try:
             client, coordinator = _get_vehicle_resources(hass, vin)
             if not _backend_allows(client, vin, Feature.FIND_MY_CAR, "trigger_alarm"):
@@ -403,11 +436,13 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             )
         except Exception as e:
             LOGGER.error("Error triggering alarm for VIN %s: %s", vin, e)
-            _record_command_error(hass, vin, "service.triggering_alarm", e)
+            _record_command_error(hass, vin, "service.triggering_alarm", e, client=client)
+
 
     async def handle_start_charging(call: ServiceCall) -> None:
         """Handle the start_charging service call."""
         vin = call.data["vin"]
+        client = None
         try:
             client, coordinator = _get_vehicle_resources(hass, vin)
             if not _backend_allows(client, vin, Feature.CHARGING_CONTROL, "start_charging"):
@@ -425,10 +460,14 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             )
         except Exception as e:
             LOGGER.error(f"Error starting charging for VIN {vin}: {e}")
+            if is_india_backend(client or hass.data.get(DOMAIN, {}).get("clients_by_vin", {}).get(vin)):
+                _record_command_error(hass, vin, "service.start_charging", e, client=client)
+
 
     async def handle_stop_charging(call: ServiceCall) -> None:
         """Handle the stop_charging service call."""
         vin = call.data["vin"]
+        client = None
         try:
             client, coordinator = _get_vehicle_resources(hass, vin)
             if not _backend_allows(client, vin, Feature.CHARGING_CONTROL, "stop_charging"):
@@ -446,10 +485,14 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             )
         except Exception as e:
             LOGGER.error(f"Error stopping charging for VIN {vin}: {e}")
+            if is_india_backend(client or hass.data.get(DOMAIN, {}).get("clients_by_vin", {}).get(vin)):
+                _record_command_error(hass, vin, "service.stop_charging", e, client=client)
+
 
     async def handle_start_battery_heating(call: ServiceCall) -> None:
         """Handle the start_battery_heating service call."""
         vin = call.data["vin"]
+        client = None
         try:
             client, coordinator = _get_vehicle_resources(hass, vin)
             if not _backend_allows(client, vin, Feature.BATTERY_HEATING, "start_battery_heating"):
@@ -467,10 +510,14 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             )
         except Exception as e:
             LOGGER.error(f"Error starting battery heating for VIN {vin}: {e}")
+            if is_india_backend(client or hass.data.get(DOMAIN, {}).get("clients_by_vin", {}).get(vin)):
+                _record_command_error(hass, vin, "service.start_battery_heating", e, client=client)
+
 
     async def handle_stop_battery_heating(call: ServiceCall) -> None:
         """Handle the stop_battery_heating service call."""
         vin = call.data["vin"]
+        client = None
         try:
             client, coordinator = _get_vehicle_resources(hass, vin)
             if not _backend_allows(client, vin, Feature.BATTERY_HEATING, "stop_battery_heating"):
@@ -488,12 +535,16 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             )
         except Exception as e:
             LOGGER.error(f"Error stopping battery heating for VIN {vin}: {e}")
+            if is_india_backend(client or hass.data.get(DOMAIN, {}).get("clients_by_vin", {}).get(vin)):
+                _record_command_error(hass, vin, "service.stop_battery_heating", e, client=client)
+
 
     async def handle_set_battery_heating_schedule(call: ServiceCall) -> None:
         """Handle the set_battery_heating_schedule service call."""
         vin = call.data["vin"]
         enable = call.data["enable"]
         start_time = call.data.get("start_time")
+        client = None
         try:
             client, coordinator = _get_vehicle_resources(hass, vin)
             if not _backend_allows(client, vin, Feature.BATTERY_HEATING, "set_battery_heating_schedule"):
@@ -538,6 +589,9 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             LOGGER.error(
                 "Error setting battery heating schedule for VIN %s: %s", vin, e
             )
+            if is_india_backend(client or hass.data.get(DOMAIN, {}).get("clients_by_vin", {}).get(vin)):
+                _record_command_error(hass, vin, "service.set_battery_heating_schedule", e, client=client)
+
 
     async def handle_set_scheduled_charging(call: ServiceCall) -> None:
         """Handle the set_scheduled_charging service call."""
@@ -557,6 +611,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             "until_scheduled_time": ScheduledChargingMode.UNTIL_CONFIGURED_TIME,
         }[mode_key]
 
+        client = None
         try:
             client, coordinator = _get_vehicle_resources(hass, vin)
             if not _backend_allows(client, vin, Feature.SCHEDULED_CHARGING, "set_scheduled_charging"):
@@ -600,12 +655,14 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             await coordinator.async_request_refresh()
         except Exception as e:
             LOGGER.error("Error setting scheduled charging for VIN %s: %s", vin, e)
-            _record_command_error(hass, vin, "service.setting_scheduled_charging", e)
+            _record_command_error(hass, vin, "service.setting_scheduled_charging", e, client=client)
+
 
     async def handle_set_charging_current(call: ServiceCall):
         """Handle the service call to set charging current."""
         vin = call.data["vin"]
         current_limit = call.data["current_limit"]
+        client = None
         try:
             client, coordinator = _get_vehicle_resources(hass, vin)
             if not _backend_allows(client, vin, Feature.CURRENT_LIMIT, "set_charging_current"):
@@ -667,11 +724,15 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             )
         except Exception as e:
             LOGGER.error("Failed to set charging current limit for VIN %s: %s", vin, e)
+            if is_india_backend(client or hass.data.get(DOMAIN, {}).get("clients_by_vin", {}).get(vin)):
+                _record_command_error(hass, vin, "service.set_charging_current", e, client=client)
+
 
     async def handle_set_target_soc(call: ServiceCall) -> None:
         """Handle the set_target_soc service call."""
         vin = call.data["vin"]
         target_soc = call.data["target_soc"]
+        client = None
         try:
             client, coordinator = _get_vehicle_resources(hass, vin)
             if not _backend_allows(client, vin, Feature.TARGET_SOC, "set_target_soc"):
@@ -688,12 +749,14 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             )
         except Exception as e:
             LOGGER.error("Error setting target SOC for VIN %s: %s", vin, e)
-            _record_command_error(hass, vin, "service.setting_target_soc", e)
+            _record_command_error(hass, vin, "service.setting_target_soc", e, client=client)
+
 
     async def handle_control_rear_window_heat(call: ServiceCall) -> None:
         """Handle the control_rear_window_heat service call."""
         vin = call.data["vin"]
         action = call.data["action"]
+        client = None
         try:
             client, coordinator = _get_vehicle_resources(hass, vin)
             if not _backend_allows(client, vin, Feature.REAR_WINDOW_HEAT, "control_rear_window_heat"):
@@ -710,13 +773,15 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             )
         except Exception as e:
             LOGGER.error("Error controlling rear window heat for VIN %s: %s", vin, e)
-            _record_command_error(hass, vin, "service.controlling_rear_window_heat", e)
+            _record_command_error(hass, vin, "service.controlling_rear_window_heat", e, client=client)
+
 
     async def handle_control_heated_seats(call: ServiceCall) -> None:
         """Handle the control_heated_seats service call."""
         vin = call.data["vin"]
         left_level = call.data["left_level"]
         right_level = call.data["right_level"]
+        client = None
         try:
             client, coordinator = _get_vehicle_resources(hass, vin)
             if not _backend_allows(client, vin, Feature.HEATED_SEATS, "control_heated_seats"):
@@ -738,11 +803,13 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             )
         except Exception as e:
             LOGGER.error("Error controlling heated seats for VIN %s: %s", vin, e)
-            _record_command_error(hass, vin, "service.controlling_heated_seats", e)
+            _record_command_error(hass, vin, "service.controlling_heated_seats", e, client=client)
+
 
     async def handle_start_front_defrost(call: ServiceCall) -> None:
         """Handle the start_front_defrost service call."""
         vin = call.data["vin"]
+        client = None
         try:
             client, coordinator = _get_vehicle_resources(hass, vin)
             if not _backend_allows(client, vin, Feature.FRONT_DEFROST, "start_front_defrost"):
@@ -759,17 +826,22 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             )
         except Exception as e:
             LOGGER.error("Error starting front defrost for VIN %s: %s", vin, e)
-            _record_command_error(hass, vin, "service.starting_front_defrost", e)
+            _record_command_error(hass, vin, "service.starting_front_defrost", e, client=client)
+
 
     async def handle_update_vehicle_data(call: ServiceCall) -> None:
         """Handle the update_vehicle_data service call."""
         vin = call.data["vin"]
+        client = None
         try:
             _, coordinator = _get_vehicle_resources(hass, vin)
             await coordinator.async_request_refresh()
             LOGGER.info("Data update triggered for VIN: %s", vin)
         except Exception as e:
             LOGGER.warning("Coordinator not found for VIN %s: %s", vin, e)
+            if is_india_backend(client or hass.data.get(DOMAIN, {}).get("clients_by_vin", {}).get(vin)):
+                _record_command_error(hass, vin, "service.update_vehicle_data", e, client=client)
+
 
     async def handle_read_cached_status(call: ServiceCall) -> dict:
         """Diagnostic: read SAIC's stored copy of the car's status.
@@ -816,6 +888,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
     async def handle_control_sunroof(call: ServiceCall) -> None:
         vin = call.data["vin"]
         should_open = call.data["should_open"]
+        client = None
         try:
             client, coordinator = _get_vehicle_resources(hass, vin)
             if not _backend_allows(client, vin, Feature.SUNROOF, "control_sunroof"):
@@ -832,11 +905,13 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             )
         except Exception as e:
             LOGGER.error("Error controlling sunroof for VIN %s: %s", vin, e)
-            _record_command_error(hass, vin, "service.controlling_sunroof", e)
+            _record_command_error(hass, vin, "service.controlling_sunroof", e, client=client)
+
 
     async def handle_control_charging_port_lock(call: ServiceCall) -> None:
         vin = call.data["vin"]
         unlock = call.data["unlock"]
+        client = None
         try:
             client, coordinator = _get_vehicle_resources(hass, vin)
             if not _backend_allows(client, vin, Feature.CHARGING_PORT_LOCK, "control_charging_port_lock"):
@@ -853,7 +928,8 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             )
         except Exception as e:
             LOGGER.error("Error controlling charging port lock for VIN %s: %s", vin, e)
-            _record_command_error(hass, vin, "service.controlling_charging_port_lock", e)
+            _record_command_error(hass, vin, "service.controlling_charging_port_lock", e, client=client)
+
 
     # Register services
     hass.services.async_register(
@@ -914,7 +990,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         DOMAIN,
         SERVICE_START_AC,
         handle_start_ac,
-        schema=SERVICE_START_AC_SCHEMA,
+        schema=vol.Schema(validate_start_ac),
     )
     hass.services.async_register(
         DOMAIN,

@@ -14,7 +14,10 @@ from homeassistant.helpers.event import (
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util.dt import now as local_now, utcnow
 from .api import SAICMGAPIClient, CommandsLimitReachedException
-from .errors import is_session_expired, is_vehicle_unreachable
+from .errors import (
+    is_session_expired, is_vehicle_unreachable, is_india_backend,
+    india_login_rejection, raise_india_login_error,
+)
 from .backends import Feature
 from .backends import backend_supports as _backend_supports
 from .logic import (
@@ -1174,6 +1177,8 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 f"startup for VIN {vin} — HA will retry automatically in the background."
             )
         except Exception as e:
+            if is_india_backend(getattr(self, "client", None)):
+                raise_india_login_error(e)
             raise ConfigEntryNotReady(
                 f"MG SAIC API unavailable at startup for VIN {vin}: {e} "
                 f"— HA will retry automatically in the background."
@@ -1381,7 +1386,9 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             # Fetch vehicle info with retries
             data["info"] = (
                 await self._fetch_with_retries(
-                    self.client.get_vehicle_info,
+                    (lambda: self.client.get_vehicle_info(vin=self.vin))
+                    if is_india_backend(getattr(self, "client", None))
+                    else self.client.get_vehicle_info,
                     self._is_generic_response_vehicle_info,
                     "vehicle info",
                 )
@@ -1449,6 +1456,8 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                     # stale/wrong data as if it were current.
                     data["status"] = None
             except Exception as e:
+                if is_india_backend(getattr(self, "client", None)):
+                    raise_india_login_error(e)
                 # During first setup, a vehicle status failure must not prevent
                 # the integration from loading.
                 if self.is_initial_setup:
@@ -1528,6 +1537,8 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                         charging_error = f"Timed out after {round(charging_timeout)}s"
                     data["charging"] = None
                 except Exception as e:
+                    if is_india_backend(getattr(self, "client", None)):
+                        raise_india_login_error(e)
                     LOGGER.warning(
                         "Charging info unavailable for VIN %s: %s — proceeding "
                         "without it; will retry on the next update",
@@ -2172,6 +2183,10 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         """Load the car's last saved status and charging data (saved_data.py)."""
         self._saved_status = self._saved_charging = None
         self._saved_vehicle_data_at = None
+        # India replies are namespaces with per-field origins, not global reply
+        # dataclasses. This codec cannot restore their provenance safely.
+        if is_india_backend(getattr(self, "client", None)):
+            return
         saved = getattr(self.trip_stats, "saved_vehicle_data", None)
         if not isinstance(saved, dict):
             return
@@ -2287,7 +2302,8 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             # Trip open/close (#301) — evaluated every poll from power_mode, so
             # it's independent of the is_powered_on transition (which the 323
             # start-message hint pre-sets before this poll runs).
-            self._update_trip_state(power_mode, basic_status, charging_data)
+            if power_mode is not None or not is_india_backend(getattr(self, "client", None)):
+                self._update_trip_state(power_mode, basic_status, charging_data)
 
             # Detect Power State
             # Track previous state so we catch the transition even if a prior
@@ -2297,7 +2313,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 if not self.is_powered_on:
                     self.last_powered_on_time = datetime.now(timezone.utc)
                 self.is_powered_on = True
-            else:
+            elif power_mode is not None or not is_india_backend(getattr(self, "client", None)):
                 if self.is_powered_on:
                     self.last_powered_off_time = datetime.now(timezone.utc)
                     LOGGER.info(
@@ -2440,6 +2456,8 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # Check for door, lock, and other physical activity
         for key in activity_keys:
             current_value = getattr(basic_status, key, None)
+            if getattr(basic_status, "india", False) is True and current_value is None:
+                continue
             last_value = getattr(self, f"_last_{key}", None)
             if last_value is None and current_value is not None:
                 # First reading since Home Assistant started: nothing to
@@ -2523,6 +2541,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             )
         elif (
             lock_just_engaged
+            and (getattr(basic_status, "india", False) is not True or power_mode == 0)
             and not self.is_charging
             and self.enable_shutdown_refresh_sequence
         ):
@@ -4045,6 +4064,10 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         refresh fires — previously this caused a 15-second delay and noisy
         ERROR log entries on every engine-start event for two-car accounts.
         """
+        india = is_india_backend(getattr(self, "client", None))
+        terminal = getattr(self, "_india_login_terminal", None) if india else None
+        if terminal is not None:
+            raise_india_login_error(terminal)
         retries = 0
         while retries < RETRY_LIMIT:
             try:
@@ -4057,6 +4080,9 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                     raise GenericResponseException(f"Generic {data_name} response.")
                 return data
             except (UpdateFailed, GenericResponseException, Exception) as e:
+                if india and india_login_rejection(e) is not None:
+                    self._india_login_terminal = e
+                    raise_india_login_error(e)
                 retries += 1
 
                 # Return code 4 = "can't reach the car". Previously only failed
@@ -4094,6 +4120,9 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                     try:
                         await self.client.login()
                     except Exception as login_exc:
+                        if india and india_login_rejection(login_exc) is not None:
+                            self._india_login_terminal = login_exc
+                            raise_india_login_error(login_exc)
                         LOGGER.warning(
                             "Re-login failed for VIN %s: %s", self.vin, login_exc
                         )
@@ -4130,6 +4159,8 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         be incorrectly flagged as generic. Fixed by wrapping the all-zero
         condition in explicit parentheses.
         """
+        if is_india_backend(getattr(self, "client", None)):
+            return False
         try:
             if not hasattr(status, "basicVehicleStatus"):
                 return False

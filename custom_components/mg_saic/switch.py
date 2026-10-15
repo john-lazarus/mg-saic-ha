@@ -13,6 +13,7 @@ from .const import (
     LOGGER,
     CHARGING_STATUS_CODES,
 )
+from .errors import is_india_backend, raise_india_command_error
 from .utils import create_device_info
 
 
@@ -667,8 +668,11 @@ class SAICMGHeatedSeatSwitch(SAICMGVehicleSwitch):
         if status:
             basic_status = getattr(status, "basicVehicleStatus", None)
             if basic_status:
-                return (getattr(basic_status, self._status_attr, 0) or 0) > 0
-        return False
+                level = getattr(basic_status, self._status_attr, None)
+                if is_india_backend(getattr(self, "_client", None)) and level is None:
+                    return None
+                return (level or 0) > 0
+        return None if is_india_backend(getattr(self, "_client", None)) else False
 
     @property
     def available(self):
@@ -688,12 +692,15 @@ class SAICMGHeatedSeatSwitch(SAICMGVehicleSwitch):
         if not pending:  # None or 0
             pending = 1  # Low
             # Reflect the default back into the select so the UI stays truthful.
-            self.coordinator.pending_seat_levels[self._seat_key] = 1
+            if not is_india_backend(getattr(self, "_client", None)):
+                self.coordinator.pending_seat_levels[self._seat_key] = 1
         return pending
 
     async def _apply(self, level):
         try:
             await self._client.control_heated_seat(self._vin, self._seat_key, level)
+            if is_india_backend(getattr(self, "_client", None)):
+                self.coordinator.pending_seat_levels[self._seat_key] = level
             LOGGER.info(
                 "Heated seat %s set to level %d for VIN: %s",
                 self._seat_key, level, self._vin,
@@ -703,16 +710,19 @@ class SAICMGHeatedSeatSwitch(SAICMGVehicleSwitch):
                 self.coordinator.after_action_delay,
                 self.coordinator.heated_seats_long_interval,
             )
-        except CommandsLimitReachedException:
+        except CommandsLimitReachedException as err:
             await self.coordinator.notify_command_limit_reached(self._vin)
-        except VehicleNotLockedException:
+            raise_india_command_error(getattr(self, "_client", None), err)
+        except VehicleNotLockedException as err:
             await self.coordinator.notify_vehicle_not_locked(self._vin)
+            raise_india_command_error(getattr(self, "_client", None), err)
         except Exception as e:
             LOGGER.error(
                 "Error setting heated seat %s for VIN %s: %s",
                 self._seat_key, self._vin, e,
             )
             self.coordinator.record_command_error("Error controlling heated seat", e)
+            raise_india_command_error(getattr(self, "_client", None), e)
 
     async def async_turn_on(self, **kwargs):
         await self._apply(self._on_level())
@@ -720,7 +730,7 @@ class SAICMGHeatedSeatSwitch(SAICMGVehicleSwitch):
 
     async def async_turn_off(self, **kwargs):
         # Clear any pending front-seat level so the select returns to Off too.
-        if self._seat_class == "front":
+        if self._seat_class == "front" and not is_india_backend(getattr(self, "_client", None)):
             self.coordinator.pending_seat_levels[self._seat_key] = 0
         await self._apply(0)
         self.async_write_ha_state()
@@ -929,13 +939,16 @@ class SAICMGSunroofSwitch(CoordinatorEntity, SwitchEntity):
                 immediate_interval,
                 long_interval,
             )
-        except CommandsLimitReachedException:
+        except CommandsLimitReachedException as err:
             await self.coordinator.notify_command_limit_reached(self._vin)
-        except VehicleNotLockedException:
+            raise_india_command_error(getattr(self, "_client", None), err)
+        except VehicleNotLockedException as err:
             await self.coordinator.notify_vehicle_not_locked(self._vin)
+            raise_india_command_error(getattr(self, "_client", None), err)
         except Exception as e:
             LOGGER.error("Error opening sunroof for VIN %s: %s", self._vin, e)
             self.coordinator.record_command_error("Error opening sunroof", e)
+            raise_india_command_error(getattr(self, "_client", None), e)
 
     async def async_turn_off(self, **kwargs):
         """Close the sunroof."""
@@ -943,13 +956,16 @@ class SAICMGSunroofSwitch(CoordinatorEntity, SwitchEntity):
             await self._client.control_sunroof(self._vin, "close")
             LOGGER.info("Sunroof closed for VIN: %s", self._vin)
             await self.coordinator.async_request_refresh()
-        except CommandsLimitReachedException:
+        except CommandsLimitReachedException as err:
             await self.coordinator.notify_command_limit_reached(self._vin)
-        except VehicleNotLockedException:
+            raise_india_command_error(getattr(self, "_client", None), err)
+        except VehicleNotLockedException as err:
             await self.coordinator.notify_vehicle_not_locked(self._vin)
+            raise_india_command_error(getattr(self, "_client", None), err)
         except Exception as e:
             LOGGER.error("Error closing sunroof for VIN %s: %s", self._vin, e)
             self.coordinator.record_command_error("Error closing sunroof", e)
+            raise_india_command_error(getattr(self, "_client", None), e)
 
 
 class SAICMGHolidayModeSwitch(CoordinatorEntity, SwitchEntity):
@@ -1125,7 +1141,10 @@ class SAICMGACSwitch(CoordinatorEntity, SwitchEntity):
         climate = self.coordinator.climate_entity
         if climate is None:
             return None
-        return climate.hvac_mode != HVACMode.OFF
+        mode = climate.hvac_mode
+        if is_india_backend(getattr(self, "_client", None)) and mode is None:
+            return None
+        return mode != HVACMode.OFF
 
     async def async_turn_on(self, **kwargs):
         """Turn the A/C on at the current setpoint by delegating to the climate
@@ -1133,6 +1152,7 @@ class SAICMGACSwitch(CoordinatorEntity, SwitchEntity):
         temperature is set (not a Cool/Heat extreme)."""
         climate = self.coordinator.climate_entity
         if climate is None:
+            raise_india_command_error(getattr(self, "_client", None), ValueError("Climate entity not ready"))
             LOGGER.warning("Climate entity not ready; cannot turn the A/C on.")
             return
         await climate.async_turn_on()
@@ -1142,6 +1162,7 @@ class SAICMGACSwitch(CoordinatorEntity, SwitchEntity):
         """Turn the A/C off by delegating to the climate entity."""
         climate = self.coordinator.climate_entity
         if climate is None:
+            raise_india_command_error(getattr(self, "_client", None), ValueError("Climate entity not ready"))
             LOGGER.warning("Climate entity not ready; cannot turn the A/C off.")
             return
         await climate.async_set_hvac_mode(HVACMode.OFF)
