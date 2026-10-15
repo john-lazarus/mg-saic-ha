@@ -109,13 +109,63 @@ class StartupTests(unittest.TestCase):
         self.assertIsNotNone(data["status"])
 
     def test_startup_budget(self):
-        # The status cap plus the charging cap fit inside the 30 s startup
-        # allowance, which is unchanged.
+        # The 30 s startup allowance is unchanged. Since beta12 the status may
+        # have up to 25 s of it (a waking car can take over 20 s), and every
+        # wait is taken from what's left, so the two caps can add up to more.
         self.assertEqual(CONST.STARTUP_API_TIMEOUT, 30)
+        self.assertEqual(CONST.STARTUP_STATUS_TIMEOUT, 25)
         self.assertLess(
-            CONST.STARTUP_STATUS_TIMEOUT + CONST.STARTUP_CHARGING_TIMEOUT,
+            CONST.STARTUP_STATUS_TIMEOUT + CONST.STARTUP_SAFETY_MARGIN,
             CONST.STARTUP_API_TIMEOUT,
         )
+
+
+class SharingTheThirtySecondsTests(unittest.TestCase):
+    """@HarryFlatter's HS took 24 s to answer as it woke (14 Oct)."""
+
+    def test_wait_helper(self):
+        self.assertEqual(COORD_MOD._startup_wait(25, None, 0), 25)
+        self.assertEqual(COORD_MOD._startup_wait(25, 28.0, 0.0), 25)
+        self.assertEqual(COORD_MOD._startup_wait(12, 28.0, 24.0), 4.0)
+        self.assertEqual(COORD_MOD._startup_wait(12, 28.0, 29.0), 0.0)
+
+    def _run(self, status_after):
+        async def waking():
+            await asyncio.sleep(status_after)
+            return NS(statusTime=1790011000)
+
+        c = _coord(waking)
+        with patch.multiple(
+            COORD_MOD,
+            STARTUP_API_TIMEOUT=0.5,
+            STARTUP_SAFETY_MARGIN=0.0,
+            STARTUP_STATUS_TIMEOUT=0.45,
+            STARTUP_CHARGING_MIN=0.2,
+        ):
+            data = asyncio.run(c._run_update_cycle())
+        return c, data
+
+    def test_a_slow_waking_car_still_gets_its_status(self):
+        # Answers at 0.3 of 0.5: past the old share, inside the new one.
+        c, data = self._run(0.3)
+        self.assertIsNotNone(data["status"])
+        self.assertFalse(c._gave_up_car_asleep)
+
+    def test_charging_skipped_when_the_status_used_the_time(self):
+        # 0.5 - 0.35 leaves 0.15, under the minimum.
+        c, data = self._run(0.35)
+        self.assertIsNotNone(data["status"])
+        self.assertEqual(c.charging_calls, [])
+        self.assertIsNone(data["charging"])
+
+    def test_a_quick_car_gets_its_charging_too(self):
+        c, data = self._run(0.0)
+        self.assertEqual(c.charging_calls, [1])
+
+    def test_a_car_that_never_answers_stays_inside_the_allowance(self):
+        c, data = self._run(3600)
+        self.assertIsNone(data["status"])
+        self.assertTrue(c._gave_up_car_asleep)
 
 
 class OneAttemptAtStartupTests(unittest.TestCase):
