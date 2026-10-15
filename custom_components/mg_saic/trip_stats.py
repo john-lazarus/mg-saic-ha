@@ -1394,6 +1394,10 @@ class TripStatsManager:
         # ago" -- #262, @HarryFlatter, 30 Sept.) Keys: last_powered_on,
         # last_powered_off, last_vehicle_activity.
         self.activity_times: dict[str, str] | None = None
+        # The car's last status and charging replies, for startup when the car
+        # doesn't answer -- see saved_data.py. Keys: status, charging,
+        # saved_at.
+        self.saved_vehicle_data: dict[str, Any] | None = None
 
     async def async_load(self) -> None:
         from homeassistant.helpers.storage import Store
@@ -1446,6 +1450,7 @@ class TripStatsManager:
         self.last_charge = data.get("last_charge")
         self.counter_reset_guard = data.get("counter_reset_guard")
         self.activity_times = data.get("activity_times")
+        self.saved_vehicle_data = data.get("saved_vehicle_data")
 
     async def async_save(self) -> None:
         """Persist current open/last-trip state and the since-charge baseline."""
@@ -1503,6 +1508,7 @@ class TripStatsManager:
                 "last_charge": self.last_charge,
                 "counter_reset_guard": self.counter_reset_guard,
                 "activity_times": self.activity_times,
+                "saved_vehicle_data": self.saved_vehicle_data,
             }
         )
 

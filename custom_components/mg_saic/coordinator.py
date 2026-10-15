@@ -37,6 +37,7 @@ from .logic import (
 )
 from .trip_stats import TripStatsManager, TripSnapshot, ChargeSnapshot
 from .cached_status import summarise_cached_status
+from .saved_data import decode_vehicle_data, encode_vehicle_data
 from .quiet_hours import (
     CHARGER_STOP_SETTLE,
     CONF_QUIET_CHARGER_ENTITY,
@@ -256,6 +257,11 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # The last status the car gave, for its controls after a poll that got
         # none (see logic.status_for_controls).
         self.last_status_data = None
+        # The car's last replies from storage, shown at startup if it doesn't
+        # answer (see saved_data.py).
+        self._saved_status = None
+        self._saved_charging = None
+        self._saved_vehicle_data_at = None
         # Seen the status's charging flag at 1 during a charge on this car,
         # so its 0 can be believed when the charging data is missing (#269).
         self._charging_flag_seen = False
@@ -1144,6 +1150,9 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
 
         # Restore Last Powered On / Last Powered Off / Last Vehicle Activity.
         self._restore_activity_times()
+        # And the car's last status and charging data, for if it doesn't
+        # answer now.
+        self._restore_saved_vehicle_data()
 
         try:
             await asyncio.wait_for(
@@ -1598,6 +1607,9 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             self._last_poll_result = (
                 DATA_FRESHNESS_LIVE if fresh_status else DATA_FRESHNESS_CACHED
             )
+
+        if self.is_initial_setup:
+            self._show_saved_vehicle_data(data)
 
         # Include capabilities in the returned data
         data["capabilities"] = {
@@ -2124,6 +2136,60 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             )
             self._schedule_trip_save()
 
+    def _restore_saved_vehicle_data(self) -> None:
+        """Load the car's last saved status and charging data (saved_data.py)."""
+        self._saved_status = self._saved_charging = None
+        self._saved_vehicle_data_at = None
+        saved = getattr(self.trip_stats, "saved_vehicle_data", None)
+        if not isinstance(saved, dict):
+            return
+        self._saved_status = decode_vehicle_data(saved.get("status"))
+        self._saved_charging = decode_vehicle_data(saved.get("charging"))
+        self._saved_vehicle_data_at = saved.get("saved_at")
+        # The car's controls fall back to these after a failed poll (#419,
+        # beta10); now that holds across a restart too.
+        if getattr(self, "last_status_data", None) is None:
+            self.last_status_data = self._saved_status
+        if getattr(self, "last_charging_data", None) is None:
+            self.last_charging_data = self._saved_charging
+
+    def _save_vehicle_data(self, status_data, charging_data) -> None:
+        """Keep the car's latest replies in storage, when they've changed."""
+        trip_stats = getattr(self, "trip_stats", None)
+        if trip_stats is None:
+            return
+        status = encode_vehicle_data(status_data)
+        if status is None:
+            return
+        previous = getattr(trip_stats, "saved_vehicle_data", None) or {}
+        charging = encode_vehicle_data(charging_data) or previous.get("charging")
+        if status == previous.get("status") and charging == previous.get("charging"):
+            return
+        trip_stats.saved_vehicle_data = {
+            "status": status,
+            "charging": charging,
+            "saved_at": datetime.now(timezone.utc).isoformat(),
+        }
+        self._schedule_trip_save()
+
+    def _show_saved_vehicle_data(self, data) -> None:
+        """At startup, with the car not answering: show what it last said."""
+        shown = []
+        if data.get("status") is None and getattr(self, "_saved_status", None) is not None:
+            data["status"] = self._saved_status
+            shown.append("status")
+        if data.get("charging") is None and getattr(self, "_saved_charging", None) is not None:
+            data["charging"] = self._saved_charging
+            shown.append("charging data")
+        if shown:
+            LOGGER.info(
+                "VIN %s didn't answer at startup: showing its %s saved at %s "
+                "until it does",
+                self.vin,
+                " and ".join(shown),
+                getattr(self, "_saved_vehicle_data_at", None) or "an earlier poll",
+            )
+
     def _schedule_trip_save(self):
         """Persist trip state in the background (best-effort)."""
         try:
@@ -2171,6 +2237,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             self.last_charging_data = charging_data
         if status_data is not None:
             self.last_status_data = status_data
+            self._save_vehicle_data(status_data, charging_data)
         recent_activity = False
 
         # Vehicle status
