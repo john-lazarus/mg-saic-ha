@@ -309,6 +309,13 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # data), cached (poll succeeded but data unchanged), or failed (poll
         # errored). None until the first cycle completes.
         self._last_poll_result = None
+        # Data Refresh sensor: whether a poll of the car is running now, and
+        # what it's waiting on (see _set_refresh_state).
+        self.refresh_in_progress = False
+        self.refresh_started = None
+        self.refresh_step = None
+        self.last_refresh_duration_s = None
+        self._refresh_listeners = []
         # Charging Data Freshness (#262): the charging endpoint fails
         # independently of vehicle status, and the charging sensors hold their
         # last values while it does -- this is what says so. See
@@ -1350,6 +1357,57 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             return data
 
     async def _run_update_cycle(self):
+        """One poll of the car, shown by the Data Refresh sensor while it runs."""
+        self._set_refresh_state(True, "vehicle info")
+        try:
+            return await self._run_update_cycle_inner()
+        finally:
+            self._set_refresh_state(False)
+
+    def add_refresh_listener(self, callback):
+        """Call ``callback`` whenever the Data Refresh state changes."""
+        listeners = self.__dict__.setdefault("_refresh_listeners", [])
+        listeners.append(callback)
+
+        def remove():
+            if callback in listeners:
+                listeners.remove(callback)
+
+        return remove
+
+    def _set_refresh_state(self, running: bool, step: str | None = None) -> None:
+        """A poll started, moved on, or finished.
+
+        A poll of a car that isn't answering can take about 4 minutes (5 tries,
+        each ~30 s of SAIC trying the car plus 15 s before the next), and
+        nothing on screen changed until it ended (James, 15 Oct 2026: Last
+        Update Time "6 minutes ago" after pressing Update Vehicle Data).
+        """
+        now = datetime.now(timezone.utc)
+        was_running = getattr(self, "refresh_in_progress", False)
+        if running and not was_running:
+            self.refresh_started = now
+        elif not running and was_running and getattr(self, "refresh_started", None):
+            self.last_refresh_duration_s = round(
+                (now - self.refresh_started).total_seconds(), 1
+            )
+        self.refresh_in_progress = running
+        self.refresh_step = step if running else None
+        for callback in list(getattr(self, "_refresh_listeners", [])):
+            try:
+                callback()
+            except Exception as e:  # noqa: BLE001 - display only
+                LOGGER.debug("Data Refresh listener failed: %s", e)
+
+    def _note_refresh_step(self, data_name: str, attempt: int) -> None:
+        """Show which request the running poll is on, and which try."""
+        if not getattr(self, "refresh_in_progress", False):
+            return
+        step = data_name if attempt <= 1 else f"{data_name}, try {attempt} of {RETRY_LIMIT}"
+        if step != getattr(self, "refresh_step", None):
+            self._set_refresh_state(True, step)
+
+    async def _run_update_cycle_inner(self):
         """Fetch data from the API.
 
         All network calls are made while holding the account-level _api_lock.
@@ -4070,6 +4128,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             raise_india_login_error(terminal)
         retries = 0
         while retries < RETRY_LIMIT:
+            self._note_refresh_step(data_name, retries + 1)
             try:
                 data = await fetch_func()
                 if data is None:

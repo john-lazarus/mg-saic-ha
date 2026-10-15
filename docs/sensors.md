@@ -80,6 +80,7 @@ Last Powered On, Last Powered Off and Last Vehicle Activity are saved by the int
 - Battery Heating Status *(if equipped)*
 - Reachability *(is the car awake / likely asleep / unreachable — see [Deep sleep & holiday mode](power-management.md#deep-sleep--holiday-mode))*
 - Data Freshness *(diagnostic: whether the last poll returned `live`, `cached` or `failed` data — see [Data Freshness sensor](power-management.md#data-freshness-sensor))*
+- Data Refresh *(diagnostic, from 1.4.0-beta13: `Running` while the integration is polling the car, `Not running` otherwise. A poll of a car that isn't answering can take about 4 minutes, 5 tries, before Last Update Time moves. Attributes: `step` — which request and which try, e.g. `vehicle status, try 3 of 5`; `started`; `last_duration_s` — how long the last poll took)*
 - Charging Data Freshness *(diagnostic, BEV/PHEV: whether the charging figures are `live`, `stale` (held from before a charging-endpoint outage) or `no_data` — see [Charging Data Freshness sensor](power-management.md#charging-data-freshness-sensor))*
 - Charging Data Last Updated *(diagnostic, BEV/PHEV: when the charging figures were last genuinely refreshed)*
 ### Trip & efficiency statistics
