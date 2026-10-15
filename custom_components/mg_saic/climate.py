@@ -16,6 +16,7 @@ from homeassistant.const import (
     ATTR_TEMPERATURE,
 )
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from .logic import status_for_controls
 from .api import CommandsLimitReachedException, VehicleNotLockedException
 from .const import (
     CLIMATE_STATUS_LOCAL_CONTROL,
@@ -283,7 +284,7 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
     @property
     def current_temperature(self):
         """Return the current interior temperature."""
-        status = self.coordinator.data.get("status")
+        status = status_for_controls(self.coordinator)
         if status:
             interior_temp = getattr(
                 status.basicVehicleStatus, "interiorTemperature", None
@@ -294,7 +295,7 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
 
     def _current_climate_status(self):
         """Return the car's current remoteClimateStatus, or None if unavailable."""
-        status = self.coordinator.data.get("status")
+        status = status_for_controls(self.coordinator)
         if status and status.basicVehicleStatus:
             return getattr(status.basicVehicleStatus, "remoteClimateStatus", 0)
         return None
@@ -1106,7 +1107,7 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
         """Return True if the climate entity is available."""
         return (
             self.coordinator.last_update_success
-            and self.coordinator.data.get("status") is not None
+            and status_for_controls(self.coordinator) is not None
         )
 
     def _fan_speed_to_int(self):

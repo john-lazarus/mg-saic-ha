@@ -7,7 +7,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 from .api import CommandsLimitReachedException, VehicleNotLockedException
 from .backends import Feature
-from .logic import charging_data_for_controls
+from .logic import charging_data_for_controls, status_for_controls
 from .const import (
     DOMAIN,
     LOGGER,
@@ -203,7 +203,7 @@ class SAICMGVehicleSwitch(CoordinatorEntity, SwitchEntity):
         """Return True if the switch entity is available."""
         return (
             self.coordinator.last_update_success
-            and self.coordinator.data.get("status") is not None
+            and status_for_controls(self.coordinator) is not None
         )
 
 
@@ -562,7 +562,7 @@ class SAICMGFrontDefrostSwitch(CoordinatorEntity, SwitchEntity):
     @property
     def is_on(self):
         """Return true if front defrost is on."""
-        status = self.coordinator.data.get("status")
+        status = status_for_controls(self.coordinator)
         if status:
             basic_status = getattr(status, "basicVehicleStatus", None)
             if basic_status:
@@ -663,7 +663,7 @@ class SAICMGHeatedSeatSwitch(SAICMGVehicleSwitch):
     @property
     def is_on(self):
         """Return true if this seat is heating (status level > 0)."""
-        status = self.coordinator.data.get("status")
+        status = status_for_controls(self.coordinator)
         if status:
             basic_status = getattr(status, "basicVehicleStatus", None)
             if basic_status:
@@ -674,7 +674,7 @@ class SAICMGHeatedSeatSwitch(SAICMGVehicleSwitch):
     def available(self):
         return (
             self.coordinator.last_update_success
-            and self.coordinator.data.get("status") is not None
+            and status_for_controls(self.coordinator) is not None
         )
 
     def _on_level(self):
@@ -761,7 +761,7 @@ class SAICMGSteeringWheelHeatSwitch(SAICMGVehicleSwitch):
         cars report this reliably (#243); when they do, it's the source of
         truth for the switch state.
         """
-        data = self.coordinator.data.get("status")
+        data = status_for_controls(self.coordinator)
         basic = getattr(data, "basicVehicleStatus", None) if data else None
         return getattr(basic, "steeringHeatLevel", None) if basic else None
 
@@ -836,7 +836,7 @@ class SAICMGRearWindowDefrostSwitch(CoordinatorEntity, SwitchEntity):
     @property
     def is_on(self):
         """Return true if rear window defrost is on."""
-        status = self.coordinator.data.get("status")
+        status = status_for_controls(self.coordinator)
         if status:
             basic_status = getattr(status, "basicVehicleStatus", None)
             if basic_status:
@@ -910,7 +910,7 @@ class SAICMGSunroofSwitch(CoordinatorEntity, SwitchEntity):
     @property
     def is_on(self):
         """Return true if the sunroof is open."""
-        status = self.coordinator.data.get("status")
+        status = status_for_controls(self.coordinator)
         if status:
             sunroof_status = getattr(status.basicVehicleStatus, "sunroofStatus", None)
             return sunroof_status == 1

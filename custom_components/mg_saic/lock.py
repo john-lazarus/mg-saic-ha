@@ -2,6 +2,7 @@
 
 from homeassistant.components.lock import LockEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from .logic import status_for_controls
 from .api import CommandsLimitReachedException, VehicleNotLockedException
 from .const import (
     DOMAIN,
@@ -53,7 +54,7 @@ class SAICMGLockEntity(CoordinatorEntity, LockEntity):
     @property
     def is_locked(self):
         """Return true if the vehicle is locked."""
-        status = self.coordinator.data.get("status")
+        status = status_for_controls(self.coordinator)
         if status:
             lock_status = getattr(status.basicVehicleStatus, "lockStatus", None)
             return lock_status == 1
@@ -64,7 +65,7 @@ class SAICMGLockEntity(CoordinatorEntity, LockEntity):
         """Return True if the lock entity is available."""
         return (
             self.coordinator.last_update_success
-            and self.coordinator.data.get("status") is not None
+            and status_for_controls(self.coordinator) is not None
         )
 
     async def async_lock(self, **kwargs):
