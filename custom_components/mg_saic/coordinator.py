@@ -123,7 +123,9 @@ from .const import (
     RETRY_BACKOFF_FACTOR,
     RETRY_LIMIT,
     STARTUP_API_TIMEOUT,
+    STARTUP_CHARGING_MIN,
     STARTUP_CHARGING_TIMEOUT,
+    STARTUP_SAFETY_MARGIN,
     STARTUP_STATUS_TIMEOUT,
     RUNTIME_CHARGING_TIMEOUT,
     STATUS_TIMESTAMP_FUTURE_TOLERANCE,
@@ -159,6 +161,13 @@ def _parse_utc(value):
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+def _startup_wait(cap, deadline, now):
+    """A startup wait: ``cap`` seconds, or what's left before ``deadline``."""
+    if deadline is None:
+        return cap
+    return max(0.0, min(cap, deadline - now))
 
 
 class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
@@ -1355,6 +1364,13 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         self._gave_up_car_asleep = False
         self._charging_outcome_recorded = False
         status_fetch_failed = False
+        # At startup every wait comes out of STARTUP_API_TIMEOUT.
+        loop = asyncio.get_running_loop()
+        startup_deadline = (
+            loop.time() + STARTUP_API_TIMEOUT - STARTUP_SAFETY_MARGIN
+            if self.is_initial_setup
+            else None
+        )
 
         # _api_lock is injected by __init__ before async_setup is called.
         # Fall back to a no-op context if somehow not set (single-entry case
@@ -1399,9 +1415,12 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 if self.is_initial_setup:
                     # Don't let a sleeping car use up the whole startup
                     # allowance (#425): carry on without its status.
+                    status_timeout = _startup_wait(
+                        STARTUP_STATUS_TIMEOUT, startup_deadline, loop.time()
+                    )
                     try:
                         data["status"] = await asyncio.wait_for(
-                            status_fetch, timeout=STARTUP_STATUS_TIMEOUT
+                            status_fetch, timeout=status_timeout
                         )
                     except asyncio.TimeoutError:
                         LOGGER.warning(
@@ -1409,7 +1428,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                             "asleep) — finishing setup without its status; it "
                             "will be fetched at the next scheduled update",
                             self.vin,
-                            STARTUP_STATUS_TIMEOUT,
+                            round(status_timeout),
                         )
                         data["status"] = None
                         # Charging data comes from the same car: skip it too.
@@ -1472,12 +1491,17 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 # #262 — a failing charging fetch used to hold up / abort the
                 # whole refresh, including manual refreshes).
                 charging_timeout = (
-                    STARTUP_CHARGING_TIMEOUT
+                    _startup_wait(
+                        STARTUP_CHARGING_TIMEOUT, startup_deadline, loop.time()
+                    )
                     if self.is_initial_setup
                     else RUNTIME_CHARGING_TIMEOUT
                 )
                 charging_error = None
                 try:
+                    if charging_timeout < STARTUP_CHARGING_MIN:
+                        # The status took most of the startup allowance.
+                        raise asyncio.TimeoutError
                     data["charging"] = await asyncio.wait_for(
                         self._fetch_with_retries(
                             lambda: self.client.get_charging_info(vin),
@@ -1487,14 +1511,22 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                         timeout=charging_timeout,
                     )
                 except asyncio.TimeoutError:
-                    LOGGER.warning(
-                        "Charging info did not return within %ss for VIN %s — "
-                        "proceeding without it; will retry on the next update",
-                        charging_timeout,
-                        self.vin,
-                    )
+                    if charging_timeout < STARTUP_CHARGING_MIN:
+                        LOGGER.info(
+                            "Startup time used up by the status for VIN %s — "
+                            "charging info will be fetched on the next update",
+                            self.vin,
+                        )
+                        charging_error = "Skipped at startup (no time left)"
+                    else:
+                        LOGGER.warning(
+                            "Charging info did not return within %ss for VIN %s — "
+                            "proceeding without it; will retry on the next update",
+                            round(charging_timeout),
+                            self.vin,
+                        )
+                        charging_error = f"Timed out after {round(charging_timeout)}s"
                     data["charging"] = None
-                    charging_error = f"Timed out after {charging_timeout}s"
                 except Exception as e:
                     LOGGER.warning(
                         "Charging info unavailable for VIN %s: %s — proceeding "

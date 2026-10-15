@@ -1405,7 +1405,19 @@ STARTUP_CHARGING_TIMEOUT = 12
 # setup failed every time until the car woke. The vehicle list comes from
 # SAIC's server, so setup can always finish without the car. Leaves room in
 # the 30 s for the vehicle list and the charging request.
-STARTUP_STATUS_TIMEOUT = 15
+#
+# 25 s since 1.4.0-beta12 (15 s in beta8-beta11). A car that's waking up can
+# take over 20 s to answer (@HarryFlatter's HS PHEV, 14 Oct: 24 s), and at
+# 15 s such a car lost its status at startup until the next poll, up to 30
+# minutes later. Every startup wait is now taken from what's left of
+# STARTUP_API_TIMEOUT (see STARTUP_SAFETY_MARGIN), so the first refresh never
+# runs past it however the time is shared out.
+STARTUP_STATUS_TIMEOUT = 25
+# Kept back from STARTUP_API_TIMEOUT when sharing out the startup waits, so
+# the first refresh always finishes inside it.
+STARTUP_SAFETY_MARGIN = 2
+# The charging request at startup is skipped when less than this is left.
+STARTUP_CHARGING_MIN = 4
 
 # On routine (non-startup) refreshes, cap the charging-info fetch too. The
 # charging endpoint can fail for long stretches independently of everything
