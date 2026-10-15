@@ -816,7 +816,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
         sensors.append(SAICMGDataFreshnessSensor(coordinator, entry, vin_info, vin_info.vin))
         sensors.append(SAICMGClimateModeSensor(coordinator, entry, vin_info, vin_info.vin))
 
-        async_add_entities(sensors, update_before_add=True)
+        async_add_entities(sensors)
 
     except Exception as e:
         LOGGER.error("Error setting up MG SAIC sensors: %s", e)
