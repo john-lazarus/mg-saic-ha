@@ -31,6 +31,7 @@ from .logic import (
     resolve_battery_capacity,
     select_update_interval,
     charging_data_for_controls,
+    basic_status_says_not_charging,
     status_charging_flag,
     status_says_not_charging,
 )
@@ -2065,6 +2066,8 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             getattr(charging_data, "chrgMgmtData", None) if charging_data else None
         )
         if chrg_mgmt_data is None:
+            if charging_data is None:
+                self._note_charge_stopped_per_status(basic_status)
             return
         status = getattr(chrg_mgmt_data, "bmsChrgSts", None)
         if status is None:
@@ -2099,6 +2102,26 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             LOGGER.debug("Charge session completed for VIN %s: %s", self.vin, charge)
             self.trip_stats.fire_charge_event(charge)
         if changed:
+            self._schedule_trip_save()
+
+    def _note_charge_stopped_per_status(self, basic_status) -> None:
+        """No charging data, but a charge is open and the car's status says it
+        has stopped: remember this reading as where the charge may have ended
+        (see trip_stats.charge_end_from_stopped)."""
+        if basic_status is None or getattr(self.trip_stats, "open_charge", None) is None:
+            return
+        if not basic_status_says_not_charging(
+            basic_status, flag_trusted=getattr(self, "_charging_flag_seen", False)
+        ):
+            return
+        snapshot = self._charge_snapshot(basic_status, None)
+        if self.trip_stats.note_charge_stopped(snapshot):
+            LOGGER.info(
+                "No charging data for VIN %s, but its status says the charge has "
+                "stopped (%s%%); noted as where the charge ended",
+                self.vin,
+                snapshot.soc_pct,
+            )
             self._schedule_trip_save()
 
     def _schedule_trip_save(self):

@@ -98,6 +98,8 @@ They only go unavailable if the car has never answered the charging request sinc
 - The **Charging** switch reads off.
 
 **Charging Duration** and the since-charge figures keep the last charge's values. If the flag says the car is still charging, everything holds its last values as before.
+
+**Last Charge Energy after an outage** *(from 1.4.0-beta11)*: a charge can only be closed once the charging data comes back, which can be the next day, after a drive. The first reading whose status said the charge had stopped is kept, and if the battery has dropped or the car has moved by the time the charge is closed, the charge ends at that reading: its battery level and range, with the start and end times from the car's own charge record. Before, the battery level after the drive was used (#269: 91.8% instead of 100%).
  
 > **Current isn't the same as right:** the state says whether the figures are *current*. If SAIC returns a successful response containing bad values, it reads `live`. The one known case — the car resetting its since-charge counters without a charge — is handled separately, and shows up in the `counter_reset_held` attributes above. See [Charging figures reset to 0 without a charge](troubleshooting.md#charging-figures-reset-to-0-without-a-charge).
  
