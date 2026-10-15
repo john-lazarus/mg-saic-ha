@@ -89,6 +89,8 @@ Use it to gate charging automations — for example, only act on Charging Power 
 
 They only go unavailable if the car has never answered the charging request since Home Assistant started.
 
+**The car's controls after a failed poll** *(from 1.4.0-beta10)*: a poll can fail when the car has just dropped off to sleep and SAIC can't wake it in time (an MGS6, eight minutes after parking). The **Lock**, **Climate**, **Climate Mode**, **Air Conditioning**, heated seat and steering wheel controls, and the defrost switches, keep the last state the car gave and stay usable. Data Freshness reads `failed` meanwhile, so you can still tell the values aren't current. A command still goes to the car as usual; if the car doesn't answer, it fails with an error as before. Once two polls in a row have failed and Reachability says `unreachable`, the controls go unavailable.
+
 **When the car's status says it has stopped** *(from 1.4.0-beta9)*: the outage often starts at the end of a charge (#269: an HS PHEV from 04:07 until the next morning). The car's vehicle status still answers, and on the HS PHEV, MG4 and MGS6 it carries a charging flag. Once that flag has been seen during a charge on your car, and it says the car isn't charging:
 
 - **Charging Power**, **Charging Current**, **Charging Voltage** and **Remaining Charging Time** read 0, instead of the charge's last figures.

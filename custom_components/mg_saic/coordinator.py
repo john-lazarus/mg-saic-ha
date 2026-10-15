@@ -252,6 +252,9 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # The last charging reply the car gave, for the charging controls
         # while the car isn't answering that request (#419).
         self.last_charging_data = None
+        # The last status the car gave, for its controls after a poll that got
+        # none (see logic.status_for_controls).
+        self.last_status_data = None
         # Seen the status's charging flag at 1 during a charge on this car,
         # so its 0 can be believed when the charging data is missing (#269).
         self._charging_flag_seen = False
@@ -2143,6 +2146,8 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         charging_data = data.get("charging")
         if charging_data is not None:
             self.last_charging_data = charging_data
+        if status_data is not None:
+            self.last_status_data = status_data
         recent_activity = False
 
         # Vehicle status
@@ -3472,6 +3477,11 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 getattr(self, "vin", "?"),
             )
         self._mark_reachable()
+
+    @property
+    def car_unreachable(self) -> bool:
+        """Flagged unreachable: several polls in a row got code 4 (#238)."""
+        return bool(getattr(self, "_last_command_unreachable", False))
 
     def _mark_reachable(self) -> None:
         """Clear the unreachable flag and reset the debounce counter.

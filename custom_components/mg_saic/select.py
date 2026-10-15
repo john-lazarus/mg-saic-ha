@@ -3,7 +3,7 @@
 from homeassistant.components.select import SelectEntity
 from homeassistant.components.climate import HVACMode
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
-from .logic import charging_data_for_controls
+from .logic import charging_data_for_controls, status_for_controls
 from .const import (
     DOMAIN,
     LOGGER,
@@ -430,7 +430,7 @@ class SAICMGHeatedSeatLevelSelect(CoordinatorEntity, SelectEntity):
         if pending is not None:
             return {0: "Off", 1: "Low", 2: "Medium", 3: "High"}.get(pending, "Off")
 
-        status = self.coordinator.data.get("status")
+        status = status_for_controls(self.coordinator)
         level = 0
         if status:
             basic_status = getattr(status, "basicVehicleStatus", None)

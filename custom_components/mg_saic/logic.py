@@ -25,6 +25,27 @@ def charging_data_for_controls(coordinator):
     return getattr(coordinator, "last_charging_data", None)
 
 
+def status_for_controls(coordinator):
+    """The vehicle status the car's controls show and act on.
+
+    The latest reply when there is one. When a poll gets no status (the car
+    dropped off to sleep and SAIC couldn't wake it in time), the last one the
+    car gave -- unless the car has been flagged unreachable, after two
+    failed polls in a row (#238). James's MGS6, 15 Oct 2026: one failed poll
+    at 08:10-08:14, eight minutes after parking, took the lock, climate,
+    air conditioning, heated seats and steering wheel unavailable while
+    Reachability still said "awake"; a refresh 80 seconds later worked first
+    time. Data Freshness ("failed") already says the figures aren't current.
+    """
+    data = getattr(coordinator, "data", None) or {}
+    current = data.get("status")
+    if current is not None:
+        return current
+    if getattr(coordinator, "car_unreachable", True) is not False:
+        return None
+    return getattr(coordinator, "last_status_data", None)
+
+
 def status_charging_flag(status):
     """The live status's "charging now" flag (extendedData2: 1/0), or None."""
     basic = getattr(status, "basicVehicleStatus", None) if status is not None else None
