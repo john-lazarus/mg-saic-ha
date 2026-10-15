@@ -78,6 +78,10 @@ MAX_OPEN_CHARGE_SECONDS = 48 * 3600
 # not charging this long after the first reading that saw it stopped, the
 # charge is taken to have ended when it stopped.
 CHARGE_PAUSE_MAX_SECONDS = 20 * 60
+# The car's charge record is only kept for a charge closed against an earlier
+# "stopped" reading (see charge_end_from_stopped) if it ended no later than
+# this after that reading -- otherwise it may be a later charge's.
+STOPPED_RECORD_MARGIN_S = 600
 
 # Reject an odometer delta larger than this (km) as a single trip — protects
 # against odometer rollover, the uint16 saturation sentinel slipping through,
@@ -570,6 +574,66 @@ def _duration_seconds(start_ts: str, end_ts: str) -> int | None:
     if delta < 0:
         return None
     return int(delta)
+
+
+def charge_end_from_stopped(
+    stopped: "ChargeSnapshot | None", current: "ChargeSnapshot | None"
+) -> "ChargeSnapshot | None":
+    """The reading a charge should be closed against, when the charging data
+    came back long after the charge ended.
+
+    @HarryFlatter's HS PHEV, 14-15 Oct 2026: the charge ended at 04:03 on
+    the 14th; the charging request then failed (return code 4) until 01:11
+    on the 15th, while the car's status kept answering, at 04:08 with 100%.
+    The charge could only be closed when the charging data came back, by
+    which time the car had been driven, and it was recorded as 6.1% to
+    91.8% (19.9 kWh) instead of 6.1% to 100% (about 21.8 kWh).
+
+    ``stopped`` is the first status-only reading that said the car had
+    stopped charging (see TripStatsManager.note_charge_stopped). When the
+    battery has dropped or the car has moved since, the charge ends there:
+    its battery level, odometer and range, with the car's own charge record
+    from ``current`` -- which has the real end time -- if that record ended
+    by then.
+    """
+    if stopped is None or current is None:
+        return current
+    dropped = (
+        stopped.soc_pct is not None
+        and current.soc_pct is not None
+        and current.soc_pct < stopped.soc_pct
+    )
+    moved = (
+        stopped.odometer_km is not None
+        and current.odometer_km is not None
+        and current.odometer_km > stopped.odometer_km + 0.5
+    )
+    if not (dropped or moved):
+        return current
+    try:
+        stopped_epoch = datetime.fromisoformat(stopped.ts).timestamp()
+    except (TypeError, ValueError):
+        stopped_epoch = None
+    keep_record = (
+        current.record_end is not None
+        and stopped_epoch is not None
+        and current.record_end <= stopped_epoch + STOPPED_RECORD_MARGIN_S
+    )
+    return replace(
+        current,
+        ts=stopped.ts,
+        soc_pct=stopped.soc_pct,
+        # The status has no pack-energy figure; the one now is after the drive.
+        pack_energy_kwh=stopped.pack_energy_kwh,
+        odometer_km=(
+            stopped.odometer_km
+            if stopped.odometer_km is not None
+            else current.odometer_km
+        ),
+        range_km=stopped.range_km,
+        record_start=current.record_start if keep_record else None,
+        record_end=current.record_end if keep_record else None,
+    )
 
 
 def _counter_delta(current, baseline_value):
@@ -1309,6 +1373,9 @@ class TripStatsManager:
         # The first reading that saw an open charge stopped but not finished
         # (see CHARGE_PAUSE_MAX_SECONDS). None while charging.
         self.charge_paused_snapshot: ChargeSnapshot | None = None
+        # The first status-only reading (no charging data) that said the open
+        # charge had stopped -- see charge_end_from_stopped.
+        self.charge_stopped_snapshot: ChargeSnapshot | None = None
         # How long the open charge has spent charging so far, as of the
         # latest reading -- see charge_session_progress. None when no charge
         # is open.
@@ -1354,6 +1421,11 @@ class TripStatsManager:
         )
         self.charge_paused_snapshot = (
             ChargeSnapshot.from_dict(data.get("charge_paused_snapshot"))
+            if self.open_charge
+            else None
+        )
+        self.charge_stopped_snapshot = (
+            ChargeSnapshot.from_dict(data.get("charge_stopped_snapshot"))
             if self.open_charge
             else None
         )
@@ -1405,6 +1477,11 @@ class TripStatsManager:
                 "charge_paused_snapshot": (
                     self.charge_paused_snapshot.to_dict()
                     if self.charge_paused_snapshot
+                    else None
+                ),
+                "charge_stopped_snapshot": (
+                    self.charge_stopped_snapshot.to_dict()
+                    if self.open_charge and self.charge_stopped_snapshot
                     else None
                 ),
                 "pre_charge_snapshot": (
@@ -1641,6 +1718,8 @@ class TripStatsManager:
 
         if is_charging:
             self.idle_charge_reading = None
+            # Charging after all (the status's stop was a pause).
+            self.charge_stopped_snapshot = None
             if self.open_charge is None:
                 # Prefer a snapshot taken while plugged in but not yet
                 # charging. Charging routinely starts between polls -- on a
@@ -1733,6 +1812,7 @@ class TripStatsManager:
             self.idle_charge_reading = snapshot
             self.pre_charge_snapshot = new_pre
             self.charge_paused_snapshot = None
+            self.charge_stopped_snapshot = None
             self.charge_progress = None
             self.open_charge_power = None
             if unseen is not None:
@@ -1770,13 +1850,16 @@ class TripStatsManager:
             # Stopped, then unplugged (and perhaps driven) before this
             # reading: the reading taken when it stopped is the charge's end.
             end = paused
-        snapshot = end
+        snapshot = charge_end_from_stopped(
+            getattr(self, "charge_stopped_snapshot", None), end
+        )
 
         # The latest reading, not the one the charge is closed against, is
         # what a following charge would start from.
         self.pre_charge_snapshot = current if is_plugged_in else None
         self.idle_charge_reading = current
         self.charge_paused_snapshot = None
+        self.charge_stopped_snapshot = None
         start = self.open_charge
         car_record = self.open_charge_record
         power_record = getattr(self, "open_charge_power", None)
@@ -1801,6 +1884,22 @@ class TripStatsManager:
             return None, True
         self.last_charge = charge
         return charge, True
+
+    def note_charge_stopped(self, snapshot: "ChargeSnapshot | None") -> bool:
+        """The charging data is missing, but the car's status says the open
+        charge has stopped: remember the first such reading, to close the
+        charge against if the car has moved on by the time the charging data
+        comes back (see charge_end_from_stopped). Returns True when stored.
+        """
+        if (
+            self.open_charge is None
+            or snapshot is None
+            or snapshot.soc_pct is None
+            or getattr(self, "charge_stopped_snapshot", None) is not None
+        ):
+            return False
+        self.charge_stopped_snapshot = snapshot
+        return True
 
     def open(self, snapshot: TripSnapshot) -> bool:
         """Record the start-of-drive snapshot (synchronous). Returns True if a

@@ -73,6 +73,20 @@ def status_says_not_charging(status, *, flag_trusted):
     return bool(flag_trusted) and status_charging_flag(status) == 0
 
 
+def basic_status_says_not_charging(basic_status, *, flag_trusted):
+    """status_says_not_charging, from the basicVehicleStatus part alone."""
+    return bool(flag_trusted) and status_charging_flag(
+        _StatusView(basic_status)
+    ) == 0
+
+
+class _StatusView:
+    __slots__ = ("basicVehicleStatus",)
+
+    def __init__(self, basic_status):
+        self.basicVehicleStatus = basic_status
+
+
 def normalize_sunroof_action(action):
     """Normalize a sunroof action to `(should_open, action_name)`."""
     if isinstance(action, bool):
