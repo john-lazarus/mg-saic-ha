@@ -2809,6 +2809,16 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         try:
             for delay in POST_SHUTDOWN_REFRESH_SEQUENCE:
                 await asyncio.sleep(delay)
+                # Not during quiet charging: these are live polls, and quiet
+                # charging is already watching the stored status for a plug-in.
+                # A car switched off at 18:50 with quiet charging from 19:00
+                # had its 19:06 and 19:16 checks reach the car mid-charge (#269).
+                if self.quiet_active and not self.is_powered_on:
+                    LOGGER.info(
+                        "Quiet charging: post-shutdown refreshes stopped for VIN %s",
+                        self.vin,
+                    )
+                    break
                 LOGGER.info(
                     "Post-shutdown refresh for VIN %s (delay was %ds)",
                     self.vin,
