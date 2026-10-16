@@ -75,7 +75,7 @@ Last Powered On, Last Powered Off and Last Vehicle Activity are saved by the int
 - Last Charge Duration *(BEV/PHEV; how long the last completed charge spent charging, pauses left out — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
 - Charge Session Duration *(BEV/PHEV; how long the charge in progress has spent charging so far, counting up across pauses, then the total once it ends — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
 - Last Trip Distance *(distance driven on the last completed drive)*
-- Last Trip Efficiency *(BEV/PHEV; switchable km/kWh · mi/kWh · kWh/100km, full breakdown in attributes)*
+- Last Trip Efficiency *(BEV/PHEV; switchable km/kWh · mi/kWh · kWh/100km, full breakdown in attributes. From 1.4.0-beta13 the drive only: energy used while parked before it is left out — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
 - Last Trip Fuel Economy *(ICE/HEV/PHEV; L/100km, with the full breakdown in its attributes)*
 - Total Battery Capacity *(kWh; corrected for models where the API reports an inaccurate value, and can be overridden per vehicle — see [Battery capacity override](#battery-capacity-override))*
 - Battery Energy *(kWh; how much energy is in the battery right now — battery percentage × usable capacity, falling back to the car's own pack-energy figure only where no capacity is known. A `source` attribute says which: `estimated` or `reported` — see [Battery Energy and capacity](#battery-energy-and-capacity))*
@@ -270,6 +270,15 @@ A `source` attribute says which you're looking at: `reported` when it's the car'
 Note the energy figure is measured **at the battery**, so it will read lower than a wall meter or smart charger, which also pay for charger and cable losses. A charge that delivers less than 0.5% is ignored (that's the small percentage rebound the pack reports after a drive, not a charge), and a session left open more than 48 hours is abandoned rather than reported. A charging-data dropout is never mistaken for the end of a charge — on some cars the charging endpoint goes quiet the moment a session completes.
 
 **Last Trip** sensors are populated when a drive ends (the car powers off). Distance and electric energy come from the car's own cumulative counters (`Mileage Since Last Charge` / `Power Usage Since Last Charge`), diffed between one trip and the next — so they match the car's own measurements and don't depend on exactly when the trip was detected. (For non-charging models, distance falls back to the odometer.) A charge between trips is handled automatically (the counters reset). A trip is one power-on to power-off, so a journey with a stop in the middle counts as two trips.
+
+**A trip's energy is the drive only** *(from 1.4.0-beta13)*. The car's energy counter keeps counting while it's parked: keeping the 12 V battery topped up, battery management, and climate run while parked. Until beta13 a trip's energy was measured from the end of the *previous* trip, so everything used while parked in between was counted against the next drive. After a long time parked, especially before a short drive, **Last Trip Efficiency** read far worse than the drive really was: a MG IM6 showed 35 kWh/100km after 18 hours parked. Now a trip's energy runs from the reading taken when the car is switched on, and the time parked before it is left out and shown on its own:
+
+| Attribute | Meaning |
+|---|---|
+| `parked_before_kWh` | energy the car used while parked between the previous trip and this one; it's no longer part of the trip's figures. The total for the whole time since the charge is **Parked Energy Since Last Charge**. |
+| `energy_includes_parked` | `true` when the trip's first reading came after the car had already moved, so the start of the drive can't be told apart from the time parked. The energy is then measured from the end of the previous trip, as before, and includes the parked time. |
+
+Trip distance is unchanged, and so is any trip HA pieced together afterwards (`retrospective`).
 
 **Plugging in ends the trip** *(from 1.3.0-beta12)*. Some cars stay "on" for a few minutes after you park, long enough to plug in and start charging before the power-off is seen. The battery level at the end of the trip was then read after charging had raised it, so the energy used came out at nothing (or less) and the trip had no efficiency (#407). Now:
 

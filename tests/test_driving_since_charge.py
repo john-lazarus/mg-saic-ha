@@ -70,14 +70,45 @@ class MichaelsDayTests(unittest.TestCase):
         self.assertEqual(r["parked_energy_kWh"], 2.1)
         self.assertEqual(r["consumption_kWh_per_100km"], 17.31)
 
-    def test_the_trip_figure_includes_the_park_before_it(self):
-        # Last Trip Efficiency's energy runs from the end of the previous
-        # trip, so the second drive's takes in the 1.7 kWh parked.
-        self.assertEqual(self.m.last_trip["energy_kWh"], 4.6)
+    def test_last_trip_leaves_the_park_out(self):
+        # Before beta13 the second drive's energy ran from the end of the
+        # first, so it took in the 1.7 kWh parked: 4.6 kWh, 28.75 kWh/100km.
+        trip = self.m.last_trip
+        self.assertEqual(trip["energy_kWh"], 2.9)
+        self.assertEqual(trip["parked_before_kWh"], 1.7)
+        self.assertEqual(trip["consumption_kWh_per_100km"], 18.12)
+        self.assertNotIn("energy_includes_parked", trip)
 
     def test_survives_a_restart(self):
         reloaded = _loaded(_saved(self.m))
         self.assertEqual(reloaded.driving_since_charge, self.m.driving_since_charge)
+
+
+class LastTripTests(unittest.TestCase):
+    def test_a_late_start_reading_keeps_the_old_figure(self):
+        # The car had already done 3 km when the trip's first reading came:
+        # the start of the drive is in the gap too, so nothing is left out.
+        m = TRIP.TripStatsManager(MagicMock(), "entry", "VIN")
+        _drive(m, _snap("07:00", 3910.0, 80.0, 0.0, 0.0),
+               _snap("07:20", 3920.0, 77.6, 10.0, 1.6))
+        trip = _drive(m, _snap("13:05", 3923.0, 74.5, 13.0, 3.8),
+                      _snap("13:30", 3936.0, 70.6, 26.0, 6.2))
+        self.assertTrue(trip["energy_includes_parked"])
+        self.assertEqual(trip["energy_kWh"], 4.6)
+        self.assertNotIn("parked_before_kWh", trip)
+        self.assertEqual(m.driving_since_charge["approximate_trips"], 1)
+
+    def test_charged_while_parked(self):
+        m = TRIP.TripStatsManager(MagicMock(), "entry", "VIN")
+        _drive(m, _snap("07:00", 3910.0, 80.0, 0.0, 0.0),
+               _snap("07:20", 3920.0, 77.6, 10.0, 1.6))
+        # Charged (the next poll sees the counters reset), then 0.3 kWh used
+        # parked before the next drive.
+        m.note_since_charge(0.0, 0.0)
+        trip = _drive(m, _snap("18:00", 3920.0, 95.0, 0.0, 0.3),
+                      _snap("18:20", 3930.0, 92.6, 10.0, 1.9))
+        self.assertEqual(trip["energy_kWh"], 1.6)
+        self.assertEqual(trip["parked_before_kWh"], 0.3)
 
 
 class ChargeTests(unittest.TestCase):

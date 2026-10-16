@@ -636,6 +636,11 @@ def charge_end_from_stopped(
     )
 
 
+# The since-charge distance counter reads in tenths of a km; it can move this
+# much between readings without the car having been driven.
+PARKED_COUNTER_SLACK_KM = 0.1
+
+
 def _counter_delta(current, baseline_value):
     """Delta of a cumulative since-charge counter against the last-close
     baseline. If it went backwards, the counter reset (a charge happened since
@@ -762,6 +767,34 @@ def compute_completed_trip(
         if retrospective or not is_electric
         else _counter_delta(end.since_charge_kwh, base_kwh)
     )
+    # The energy counter keeps counting while the car is parked (12 V top-ups,
+    # battery management, climate), so measured from the end of the previous
+    # trip it took in the whole time parked as well. A MG IM6, Oct 2026: a
+    # short drive after 18 hours parked read 35 kWh/100km. Since 1.4.0-beta13
+    # a trip's energy runs from its own start -- when the car hadn't moved
+    # before the start reading, which is the usual case. If it had (the
+    # reading came late), the start of the drive is in that gap too, so the
+    # old figure stands and ``energy_includes_parked`` says so.
+    parked_before_kwh = None
+    energy_includes_parked = False
+    if (
+        raw_counter_kwh is not None
+        and start.since_charge_kwh is not None
+        and start.since_charge_km is not None
+        and end.since_charge_kwh is not None
+        and end.since_charge_kwh >= start.since_charge_kwh
+    ):
+        reset_since_baseline = base_km is None or start.since_charge_km < base_km
+        not_moved = (
+            reset_since_baseline
+            or start.since_charge_km - base_km <= PARKED_COUNTER_SLACK_KM
+        )
+        if not_moved:
+            drive_kwh = round(end.since_charge_kwh - start.since_charge_kwh, 3)
+            parked_before_kwh = round(max(0.0, raw_counter_kwh - drive_kwh), 3)
+            raw_counter_kwh = drive_kwh
+        else:
+            energy_includes_parked = True
 
     # SOC-derived energy, computed independently whenever SOC data allows it —
     # not just as a fallback for when the counter is missing. Paired with the
@@ -850,6 +883,10 @@ def compute_completed_trip(
         "fuel_economy_mpg_us": None,
         "refuel_detected": False,
     }
+    if parked_before_kwh is not None:
+        trip["parked_before_kWh"] = parked_before_kwh
+    if energy_includes_parked:
+        trip["energy_includes_parked"] = True
     if counter_reset_detected:
         # Distance came from the odometer (see above) because the since-charge
         # counter reset mid-trip without an actual charge; the counter's energy
@@ -1021,26 +1058,11 @@ def add_trip_to_driving_tally(
     else:
         tally = dict(tally)
     distance = trip.get("distance_km")
-    # The drive's own energy: the car's counter from the reading at power-on
-    # to the one at power-off. Not the trip's energy_kWh, which is counted
-    # from the end of the previous trip and so takes in the time parked in
-    # between (see compute_completed_trip).
-    energy = None
-    approximate = bool(trip.get("retrospective"))
-    start_kwh = getattr(start, "since_charge_kwh", None) if start is not None else None
-    if (
-        not approximate
-        and start_kwh is not None
-        and end.since_charge_kwh is not None
-        and end.since_charge_kwh >= start_kwh
-        and (start_km is None or start_km <= end_km)
-    ):
-        energy = end.since_charge_kwh - start_kwh
-    else:
-        # No counter across the drive itself: the trip's own figure, which
-        # may include some time parked.
-        energy = trip.get("energy_kWh")
-        approximate = True
+    # The trip's energy runs from its own start since 1.4.0-beta13, so the
+    # time parked is already left out -- except on a trip pieced together
+    # afterwards, or one whose start reading came after the car had moved.
+    energy = trip.get("energy_kWh")
+    approximate = bool(trip.get("retrospective") or trip.get("energy_includes_parked"))
     if isinstance(distance, (int, float)) and distance > 0:
         tally["distance_km"] = round(tally["distance_km"] + distance, 3)
         tally["trips"] += 1
