@@ -600,6 +600,15 @@ COUNTER_RESET_SOC_RISE_PARKED_PCT = 1.0
 # well beyond what regen can add between two polls.
 COUNTER_RESET_SOC_RISE_ANY_PCT = 5.0
 
+# A since-charge counter only counts as reset when it falls below this share
+# of its previous value: a reset (a charge, or a phantom one) takes it back
+# to about zero. A smaller fall is the car's figure wobbling, and the higher
+# value is kept until the car's passes it. @Heiko-Schneider's MG4, 14-16 Oct
+# 2026 (#436): Power Usage Since Last Charge going 25.0 -> 24.9 -> 25.0 ->
+# 24.9 kWh. Each dip was taken as a phantom reset and the whole previous
+# figure added on top, nine times: 297.9 kWh shown for the car's 45.0.
+COUNTER_RESET_FRACTION = 0.5
+
 
 # Raw odometer units (0.1 km): the charge baseline is only re-saved when it
 # moves by more than 1 km.
@@ -653,6 +662,7 @@ class SinceChargeCounterGuard:
         self.baseline_odo = None
         self.odometer_in_km = False
         self._accepted_reset = False
+        self.wobbled = []
 
     # -- persistence (stored alongside trip stats) --
 
@@ -703,6 +713,36 @@ class SinceChargeCounterGuard:
     def _dropped(last, reading, key):
         new, old = reading.get(key), last.get(key)
         return new is not None and old is not None and new < old
+
+    @classmethod
+    def _fell_to_reset(cls, last, reading, key):
+        """Dropped far enough to be a reset (see COUNTER_RESET_FRACTION)."""
+        return cls._dropped(last, reading, key) and (
+            reading[key] < last[key] * COUNTER_RESET_FRACTION
+        )
+
+    @classmethod
+    def _wobbled(cls, last, reading, key):
+        """Dipped a little: the car's figure wobbling, not a reset."""
+        return cls._dropped(last, reading, key) and not cls._fell_to_reset(
+            last, reading, key
+        )
+
+    def repair_one_sided_hold(self):
+        """Undo holds that wobbles built up before COUNTER_RESET_FRACTION.
+
+        A reset takes both counters back together; a hold on only one of
+        them (energy but not distance, as on #436's MG4) can only have come
+        from that counter wobbling. Returns True when anything was cleared.
+        """
+        repaired = False
+        if self.offset_kwh and not self.offset_km:
+            self.offset_kwh = 0
+            repaired = True
+        if self.offset_km and not self.offset_kwh:
+            self.offset_km = 0
+            repaired = True
+        return repaired
 
     @staticmethod
     def _soc_evidence(last, reading):
@@ -804,9 +844,20 @@ class SinceChargeCounterGuard:
         if last is None:
             return self.adjusted(reading), None, self.holding
 
+        # A counter that only dipped keeps its previous value (#436), as if
+        # the car had reported that. Never a reset, never added to.
+        self.wobbled = [
+            key for key in ("km", "kwh") if self._wobbled(last, reading, key)
+        ]
+        if self.wobbled:
+            reading = dict(reading)
+            for key in self.wobbled:
+                reading[key] = last[key]
+            self.last = dict(reading)
+
         reset = (
-            self._dropped(last, reading, "km")
-            or self._dropped(last, reading, "kwh")
+            self._fell_to_reset(last, reading, "km")
+            or self._fell_to_reset(last, reading, "kwh")
             or (
                 reading.get("end") is not None
                 and last.get("end") is not None
@@ -835,9 +886,9 @@ class SinceChargeCounterGuard:
 
         # Phantom: counters reset to 0, so fold the whole previous raw value
         # of each counter that dropped into its offset.
-        if self._dropped(last, reading, "km"):
+        if self._fell_to_reset(last, reading, "km"):
             self.offset_km += last["km"]
-        if self._dropped(last, reading, "kwh"):
+        if self._fell_to_reset(last, reading, "kwh"):
             self.offset_kwh += last["kwh"]
         if (
             self.held_ending is None

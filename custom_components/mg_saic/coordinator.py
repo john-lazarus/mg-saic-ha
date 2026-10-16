@@ -1163,6 +1163,15 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             self.counter_reset_guard = SinceChargeCounterGuard.from_dict(
                 self.trip_stats.counter_reset_guard
             )
+            if self.counter_reset_guard.repair_one_sided_hold():
+                LOGGER.info(
+                    "VIN %s: cleared a since-charge hold built up by the car's "
+                    "figure wobbling, not resetting -- Power Usage / Mileage "
+                    "Since Last Charge show the car's own figures again (#436)",
+                    self.vin,
+                )
+                self.trip_stats.counter_reset_guard = self.counter_reset_guard.to_dict()
+                self._schedule_trip_save()
         except Exception as e:  # noqa: BLE001 - stats must never block setup
             LOGGER.warning("Trip stats unavailable for VIN %s: %s", self.vin, e)
             self.trip_stats = None
@@ -3946,6 +3955,13 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                     "VIN %s: genuine charge detected -- since-charge counters "
                     "no longer held over the earlier phantom reset (#262)",
                     self.vin,
+                )
+            if getattr(guard, "wobbled", None):
+                LOGGER.debug(
+                    "VIN %s: since-charge %s dipped slightly (raw %s, %s) -- "
+                    "keeping the previous figure (#436)",
+                    self.vin, " and ".join(guard.wobbled), reading["km"],
+                    reading["kwh"],
                 )
 
             for field, key in (
