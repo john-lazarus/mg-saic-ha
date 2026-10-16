@@ -3263,6 +3263,10 @@ class SAICMGVehicleReachabilitySensor(CoordinatorEntity, SensorEntity):
 
     _attr_icon = "mdi:sleep"
     _attr_device_class = SensorDeviceClass.ENUM
+    # In the Diagnostic section since 1.4.0-beta13, with Data Freshness and
+    # Data Refresh: it describes the connection to the car. Same entity ID,
+    # name and states.
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
     # Lets Home Assistant translate the raw state values (which must stay
     # lowercase snake_case, since automations/templates match on them) into
     # friendly display labels via translations/<lang>.json -> entity.sensor.
