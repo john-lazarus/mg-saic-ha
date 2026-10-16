@@ -66,27 +66,52 @@ Last Powered On, Last Powered Off and Last Vehicle Activity are saved by the int
 - Added Electric Range *(the range the last charge added, where the car reports it — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
 - Power Usage Since Last Charge *(held through resets the car makes without a charge — see [Charging figures reset to 0 without a charge](troubleshooting.md#charging-figures-reset-to-0-without-a-charge))*
 - Mileage Since Last Charge *(as above)*
-- Efficiency Since Last Charge *(BEV/PHEV; km/kWh, derived from the two sensors above — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
+- Efficiency Since Last Charge (Driving and Parked) *(BEV/PHEV; km/kWh, derived from the two sensors above, so it includes energy used while parked. Called Efficiency Since Last Charge before 1.4.0-beta13; the entity ID is unchanged — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
+- Efficiency Since Last Charge (Driving Only) *(BEV/PHEV, from 1.4.0-beta13; km/kWh, the drives since the last charge added up, so the time parked is left out — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
+- Parked Energy Since Last Charge *(BEV/PHEV, from 1.4.0-beta13; kWh used while not being driven since the last charge — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
 - Efficiency Since Charge (SOC) *(BEV/PHEV; km/kWh, an SOC/odometer-only alternative independent of the counters above — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
 - Last Charge Range Added *(BEV/PHEV; electric range the last completed charge put back — shown in your Home Assistant unit system, so miles if that's what you use)*
 - Last Charge Energy *(BEV/PHEV; kWh put **into** the battery by the last completed charge — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
 - Last Charge Duration *(BEV/PHEV; how long the last completed charge spent charging, pauses left out — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
 - Charge Session Duration *(BEV/PHEV; how long the charge in progress has spent charging so far, counting up across pauses, then the total once it ends — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
 - Last Trip Distance *(distance driven on the last completed drive)*
-- Last Trip Efficiency *(BEV/PHEV; switchable km/kWh · mi/kWh · kWh/100km, full breakdown in attributes)*
+- Last Trip Efficiency *(BEV/PHEV; switchable km/kWh · mi/kWh · kWh/100km, full breakdown in attributes. From 1.4.0-beta13 the drive only: energy used while parked before it is left out — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
 - Last Trip Fuel Economy *(ICE/HEV/PHEV; L/100km, with the full breakdown in its attributes)*
 - Total Battery Capacity *(kWh; corrected for models where the API reports an inaccurate value, and can be overridden per vehicle — see [Battery capacity override](#battery-capacity-override))*
 - Battery Energy *(kWh; how much energy is in the battery right now — battery percentage × usable capacity, falling back to the car's own pack-energy figure only where no capacity is known. A `source` attribute says which: `estimated` or `reported` — see [Battery Energy and capacity](#battery-energy-and-capacity))*
 - Battery Heating Status *(if equipped)*
-- Reachability *(is the car awake / likely asleep / unreachable — see [Deep sleep & holiday mode](power-management.md#deep-sleep--holiday-mode))*
+- Reachability *(diagnostic from 1.4.0-beta13: is the car awake / likely asleep / unreachable — see [Deep sleep & holiday mode](power-management.md#deep-sleep--holiday-mode). Moved to the device's **Diagnostic** section in beta13, next to Data Freshness and Data Refresh. Its entity ID, name, states and history are unchanged, so automations, templates and dashboard cards that use it carry on as before; it just no longer appears on Home Assistant's auto-generated dashboard)*
 - Data Freshness *(diagnostic: whether the last poll returned `live`, `cached` or `failed` data — see [Data Freshness sensor](power-management.md#data-freshness-sensor))*
+- Data Refresh *(diagnostic, from 1.4.0-beta13: `Running` while the integration is polling the car, `Not running` otherwise. A poll of a car that isn't answering can take about 4 minutes, 5 tries, before Last Update Time moves. Attributes: `step` — which request and which try, e.g. `vehicle status, try 3 of 5`; `started`; `last_duration_s` — how long the last poll took)*
 - Charging Data Freshness *(diagnostic, BEV/PHEV: whether the charging figures are `live`, `stale` (held from before a charging-endpoint outage) or `no_data` — see [Charging Data Freshness sensor](power-management.md#charging-data-freshness-sensor))*
 - Charging Data Last Updated *(diagnostic, BEV/PHEV: when the charging figures were last genuinely refreshed)*
 ### Trip & efficiency statistics
 
 The integration derives per-trip and per-charge efficiency from data it already collects — the odometer, state of charge, and (for combustion models) fuel level — so no extra setup is needed.
 
-**Efficiency Since Last Charge** *(BEV/PHEV)* comes straight from the car's own `Mileage Since Last Charge` and `Power Usage Since Last Charge` figures, so it's available immediately and needs no trip tracking.
+**Efficiency Since Last Charge (Driving and Parked)** *(BEV/PHEV)* comes straight from the car's own `Mileage Since Last Charge` and `Power Usage Since Last Charge` figures, so it's available immediately and needs no trip tracking. Those figures count everything the car has used since it charged, **parked or driving**: keeping the 12 V battery topped up, battery management, and climate run while parked all count against the distance driven. After a long time parked, or with only short drives, it reads much worse than the car really drives. *(Called Efficiency Since Last Charge before 1.4.0-beta13. Only the name shown changed: the entity ID of an existing install stays the same, for example `sensor.mg_mgs6_ev_efficiency_since_last_charge`, and a name you've set yourself is kept.)*
+
+**Efficiency Since Last Charge (Driving Only)** *(BEV/PHEV, from 1.4.0-beta13)* counts only the drives. It adds up the drives since the last charge and divides the distance by the energy, so the time parked is left out. Each drive's energy is the car's own counter from the reading taken when it's switched on to the one when it's switched off. Short trips are included: one short trip on its own is too rough to judge (see `Last Trip Efficiency`), but added together their distances and energy even out.
+
+**Parked Energy Since Last Charge** *(BEV/PHEV, from 1.4.0-beta13)* is the rest: the energy the car has used since the charge while **not** being driven — everything since the charge, less what the drives used. It doesn't change during a drive.
+
+An example from a MG IM6 after 18 hours parked: 6.2 kWh over 26 km (16 miles) since the charge, so **Driving and Parked** read 23.9 kWh/100km (about 2.6 mi/kWh). If the drives used 4.5 kWh of that, **Driving Only** reads 17.3 kWh/100km (about 3.6 mi/kWh) and **Parked Energy** 1.7 kWh.
+
+Both new sensors have the same attributes:
+
+| Attribute | Meaning |
+|---|---|
+| `driving_distance_km` / `driving_distance_mi` | distance of the drives added up |
+| `driving_energy_kWh` | energy those drives used |
+| `parked_energy_kWh` | energy used while parked (the Parked Energy sensor's value) |
+| `energy_since_charge_kWh`, `distance_since_charge_km` | the car's own since-charge totals (what Driving and Parked uses) |
+| `trips` | how many drives were added up |
+| `trips_without_energy` | drives with a distance but no energy figure (counted in the distance only) |
+| `approximate_trips` | drives whose energy couldn't be read across the drive itself — pieced together afterwards because HA didn't see them happen, or the charging data was missing when the car was switched on — so their energy may include some time parked |
+| `trip_in_progress` | a drive is under way; it's added when it ends |
+| `efficiency_km_per_kWh`, `efficiency_mi_per_kWh`, `consumption_kWh_per_100km`, `consumption_kWh_per_100mi` | the driving-only figure in each unit |
+
+Both start again at each charge. After installing beta13 they start from the next charge, as there are no drives to add up before that. They need the car's `Mileage Since Last Charge` figure; a car that doesn't report it shows Unknown.
 
 **Efficiency Since Charge (SOC)** *(BEV/PHEV)* is an alternative to the sensor above, computed entirely from the odometer and battery percentage — it never touches the `Mileage Since Last Charge` / `Power Usage Since Last Charge` fields at all. It exists because those fields are unreliable on some cars (they can reset spuriously without an actual charge — see below) and permanently unpopulated (`Unknown`) on others; this sensor works either way, and lets you compare the two where both are available. Its "since charge" point is where the car was last seen to gain charge, which may not always be a full charge to 100%. That's taken from the car's own charging state where it reports one, and otherwise inferred: a battery percentage rise while the odometer is unchanged means energy came from outside the car. A rise after the car has moved is regen, not a charge, so it doesn't reset the measurement — without that distinction, arriving somewhere downhill on a net regen gain would look identical to plugging in and would silently drop the leg you'd just driven from the figures.
 
@@ -246,6 +271,15 @@ Note the energy figure is measured **at the battery**, so it will read lower tha
 
 **Last Trip** sensors are populated when a drive ends (the car powers off). Distance and electric energy come from the car's own cumulative counters (`Mileage Since Last Charge` / `Power Usage Since Last Charge`), diffed between one trip and the next — so they match the car's own measurements and don't depend on exactly when the trip was detected. (For non-charging models, distance falls back to the odometer.) A charge between trips is handled automatically (the counters reset). A trip is one power-on to power-off, so a journey with a stop in the middle counts as two trips.
 
+**A trip's energy is the drive only** *(from 1.4.0-beta13)*. The car's energy counter keeps counting while it's parked: keeping the 12 V battery topped up, battery management, and climate run while parked. Until beta13 a trip's energy was measured from the end of the *previous* trip, so everything used while parked in between was counted against the next drive. After a long time parked, especially before a short drive, **Last Trip Efficiency** read far worse than the drive really was: a MG IM6 showed 35 kWh/100km after 18 hours parked. Now a trip's energy runs from the reading taken when the car is switched on, and the time parked before it is left out and shown on its own:
+
+| Attribute | Meaning |
+|---|---|
+| `parked_before_kWh` | energy the car used while parked between the previous trip and this one; it's no longer part of the trip's figures. The total for the whole time since the charge is **Parked Energy Since Last Charge**. |
+| `energy_includes_parked` | `true` when the trip's first reading came after the car had already moved, so the start of the drive can't be told apart from the time parked. The energy is then measured from the end of the previous trip, as before, and includes the parked time. |
+
+Trip distance is unchanged, and so is any trip HA pieced together afterwards (`retrospective`).
+
 **Plugging in ends the trip** *(from 1.3.0-beta12)*. Some cars stay "on" for a few minutes after you park, long enough to plug in and start charging before the power-off is seen. The battery level at the end of the trip was then read after charging had raised it, so the energy used came out at nothing (or less) and the trip had no efficiency (#407). Now:
 
 - If the car is still on when the cable is first seen connected, the trip is closed there and then (`closed_at_plug_in: true`).
@@ -273,7 +307,7 @@ Notes and limitations:
 This matters if you refuel shortly after setting off: some cars hold a single trip open across a short stop, so the whole refuel lands inside the trip. Without this, a four-mile drive with a fill-up in it reported *"fuel used: −48%"* — technically the start-minus-end figure, but dominated entirely by the refuel rather than by anything the car burned.
 
 > **Renamed in 1.2.9-beta6:** this attribute was previously `refuelled_during_park`. Nothing about it ever examined whether the car was parked — it compares the fuel level at the start of the trip against the end — so the old name was misleading on exactly the cars where it matters most. If you template against it, update the name.
-- When a value can't be computed yet, the efficiency sensors read **Unknown** rather than Unavailable — e.g. `Efficiency Since Last Charge` while charging or right after a charge (0 km driven since), or `Last Trip Efficiency` for a trip where a charge spanned the drive. The sensor's attributes still show the breakdown so you can see why.
+- When a value can't be computed yet, the efficiency sensors read **Unknown** rather than Unavailable — e.g. `Efficiency Since Last Charge (Driving and Parked)` or `(Driving Only)` while charging or right after a charge (0 km driven since), or `Last Trip Efficiency` for a trip where a charge spanned the drive. The sensor's attributes still show the breakdown so you can see why.
 
 ### Journey Distance
 

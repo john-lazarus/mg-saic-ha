@@ -636,6 +636,11 @@ def charge_end_from_stopped(
     )
 
 
+# The since-charge distance counter reads in tenths of a km; it can move this
+# much between readings without the car having been driven.
+PARKED_COUNTER_SLACK_KM = 0.1
+
+
 def _counter_delta(current, baseline_value):
     """Delta of a cumulative since-charge counter against the last-close
     baseline. If it went backwards, the counter reset (a charge happened since
@@ -762,6 +767,34 @@ def compute_completed_trip(
         if retrospective or not is_electric
         else _counter_delta(end.since_charge_kwh, base_kwh)
     )
+    # The energy counter keeps counting while the car is parked (12 V top-ups,
+    # battery management, climate), so measured from the end of the previous
+    # trip it took in the whole time parked as well. A MG IM6, Oct 2026: a
+    # short drive after 18 hours parked read 35 kWh/100km. Since 1.4.0-beta13
+    # a trip's energy runs from its own start -- when the car hadn't moved
+    # before the start reading, which is the usual case. If it had (the
+    # reading came late), the start of the drive is in that gap too, so the
+    # old figure stands and ``energy_includes_parked`` says so.
+    parked_before_kwh = None
+    energy_includes_parked = False
+    if (
+        raw_counter_kwh is not None
+        and start.since_charge_kwh is not None
+        and start.since_charge_km is not None
+        and end.since_charge_kwh is not None
+        and end.since_charge_kwh >= start.since_charge_kwh
+    ):
+        reset_since_baseline = base_km is None or start.since_charge_km < base_km
+        not_moved = (
+            reset_since_baseline
+            or start.since_charge_km - base_km <= PARKED_COUNTER_SLACK_KM
+        )
+        if not_moved:
+            drive_kwh = round(end.since_charge_kwh - start.since_charge_kwh, 3)
+            parked_before_kwh = round(max(0.0, raw_counter_kwh - drive_kwh), 3)
+            raw_counter_kwh = drive_kwh
+        else:
+            energy_includes_parked = True
 
     # SOC-derived energy, computed independently whenever SOC data allows it —
     # not just as a fallback for when the counter is missing. Paired with the
@@ -850,6 +883,10 @@ def compute_completed_trip(
         "fuel_economy_mpg_us": None,
         "refuel_detected": False,
     }
+    if parked_before_kwh is not None:
+        trip["parked_before_kWh"] = parked_before_kwh
+    if energy_includes_parked:
+        trip["energy_includes_parked"] = True
     if counter_reset_detected:
         # Distance came from the odometer (see above) because the since-charge
         # counter reset mid-trip without an actual charge; the counter's energy
@@ -973,6 +1010,133 @@ def compute_since_charge_efficiency(
         "consumption_kWh_per_100km": round(energy_kwh / distance_km * 100.0, 2),
         "consumption_kWh_per_100mi": round(energy_kwh / distance_mi * 100.0, 2),
     }
+
+
+# The car's since-charge distance counter has to drop by more than this to
+# count as a charge between trips (it reads in tenths of a km).
+SINCE_CHARGE_DROP_KM = 0.05
+
+
+def add_trip_to_driving_tally(
+    tally: dict[str, Any] | None,
+    trip: dict[str, Any] | None,
+    start: "TripSnapshot | None",
+    end: "TripSnapshot",
+) -> dict[str, Any] | None:
+    """Add one finished trip to the driving done since the last charge.
+
+    For Efficiency Since Last Charge (Driving Only) and Parked Energy Since
+    Last Charge. The car's own since-charge counters (what Efficiency Since
+    Last Charge uses) count everything the car has used since it charged,
+    parked or driving. A MG IM6 owner, Oct 2026: 6.2 kWh over 26 km
+    (23.9 kWh/100km) after 18 hours parked. Adding up the trips leaves the
+    parked time out.
+
+    The tally belongs to one charge: it starts again when the car's
+    since-charge distance has dropped since the last trip (a charge between
+    them). Cars that don't report that counter get no tally.
+    """
+    if trip is None or end is None or end.since_charge_km is None:
+        return tally
+    end_km = end.since_charge_km
+    start_km = getattr(start, "since_charge_km", None) if start is not None else None
+    last_km = (tally or {}).get("since_charge_km")
+    new_charge = (
+        tally is None
+        or last_km is None
+        or (start_km is not None and start_km < last_km - SINCE_CHARGE_DROP_KM)
+        or end_km < last_km - SINCE_CHARGE_DROP_KM
+    )
+    if new_charge:
+        tally = {
+            "distance_km": 0.0,
+            "energy_kWh": 0.0,
+            "trips": 0,
+            "trips_without_energy": 0,
+            "approximate_trips": 0,
+        }
+    else:
+        tally = dict(tally)
+    distance = trip.get("distance_km")
+    # The trip's energy runs from its own start since 1.4.0-beta13, so the
+    # time parked is already left out -- except on a trip pieced together
+    # afterwards, or one whose start reading came after the car had moved.
+    energy = trip.get("energy_kWh")
+    approximate = bool(trip.get("retrospective") or trip.get("energy_includes_parked"))
+    if isinstance(distance, (int, float)) and distance > 0:
+        tally["distance_km"] = round(tally["distance_km"] + distance, 3)
+        tally["trips"] += 1
+        if isinstance(energy, (int, float)) and energy > 0:
+            tally["energy_kWh"] = round(tally["energy_kWh"] + energy, 3)
+        else:
+            tally["trips_without_energy"] += 1
+        if approximate:
+            tally["approximate_trips"] += 1
+    tally["since_charge_km"] = round(end_km, 3)
+    return tally
+
+
+def compute_driving_since_charge(
+    tally: dict[str, Any] | None,
+    total_km: float | None,
+    total_kwh: float | None,
+    *,
+    open_trip_start: "TripSnapshot | None" = None,
+) -> dict[str, Any] | None:
+    """Driving-only efficiency and parked energy since the last charge.
+
+    ``total_km`` / ``total_kwh`` are the car's since-charge counters now (the
+    figures Efficiency Since Last Charge uses). ``open_trip_start`` is the
+    reading a drive in progress started from, so the drive isn't counted as
+    parked before it has finished.
+    """
+    if total_km is None or total_kwh is None:
+        return None
+    last_km = (tally or {}).get("since_charge_km")
+    open_start_km = getattr(open_trip_start, "since_charge_km", None)
+    same_charge = (
+        tally is not None
+        and last_km is not None
+        and total_km >= last_km - SINCE_CHARGE_DROP_KM
+        and (open_start_km is None or open_start_km >= last_km - SINCE_CHARGE_DROP_KM)
+    )
+    if not same_charge:
+        tally = {"distance_km": 0.0, "energy_kWh": 0.0, "trips": 0,
+                 "trips_without_energy": 0, "approximate_trips": 0}
+    driving_km = tally["distance_km"]
+    driving_kwh = tally["energy_kWh"]
+    # While driving, the energy so far this drive is neither parked nor yet
+    # in the tally: count up to where the drive started.
+    reference_kwh = total_kwh
+    open_start_kwh = getattr(open_trip_start, "since_charge_kwh", None)
+    if open_start_kwh is not None and open_start_kwh <= total_kwh:
+        reference_kwh = open_start_kwh
+    result: dict[str, Any] = {
+        "driving_distance_km": round(driving_km, 2),
+        "driving_distance_mi": round(driving_km / KM_PER_MILE, 2),
+        "driving_energy_kWh": round(driving_kwh, 3),
+        "parked_energy_kWh": round(max(0.0, reference_kwh - driving_kwh), 3),
+        "energy_since_charge_kWh": round(total_kwh, 3),
+        "distance_since_charge_km": round(total_km, 2),
+        "trips": tally["trips"],
+        "trips_without_energy": tally["trips_without_energy"],
+        "approximate_trips": tally["approximate_trips"],
+        "trip_in_progress": open_trip_start is not None,
+        "efficiency_km_per_kWh": None,
+        "efficiency_mi_per_kWh": None,
+        "consumption_kWh_per_100km": None,
+        "consumption_kWh_per_100mi": None,
+    }
+    if driving_km > 0 and driving_kwh > 0:
+        result.update({
+            "efficiency_km_per_kWh": round(driving_km / driving_kwh, 2),
+            "efficiency_mi_per_kWh": round(driving_km / KM_PER_MILE / driving_kwh, 2),
+            "consumption_kWh_per_100km": round(driving_kwh / driving_km * 100.0, 2),
+            "consumption_kWh_per_100mi": round(
+                driving_kwh / (driving_km / KM_PER_MILE) * 100.0, 2
+            ),
+        })
+    return result
 
 
 def compute_soc_since_reset_efficiency(
@@ -1338,6 +1502,9 @@ class TripStatsManager:
         # where the battery was before it did -- see close().
         self.open_trip_unplugged: TripSnapshot | None = None
         self.last_trip: dict[str, Any] | None = None
+        # Trips since the last charge, added up -- see
+        # add_trip_to_driving_tally.
+        self.driving_since_charge: dict[str, Any] | None = None
         # Since-charge counter values at the last trip close (rebased to ~0 when
         # a charge resets the counter). Distance/energy for the next trip diff
         # against this — see note_since_charge / close.
@@ -1419,6 +1586,7 @@ class TripStatsManager:
         )
         self.soc_reset_baseline = data.get("soc_reset_baseline")
         self.last_parked_soc_reading = data.get("last_parked_soc_reading")
+        self.driving_since_charge = data.get("driving_since_charge")
         self.open_charge = ChargeSnapshot.from_dict(data.get("open_charge"))
         self.open_charge_record = (
             data.get("open_charge_record") if self.open_charge else None
@@ -1475,6 +1643,7 @@ class TripStatsManager:
                 ),
                 "soc_reset_baseline": self.soc_reset_baseline,
                 "last_parked_soc_reading": self.last_parked_soc_reading,
+                "driving_since_charge": self.driving_since_charge,
                 "open_charge": (
                     self.open_charge.to_dict() if self.open_charge else None
                 ),
@@ -1995,10 +2164,13 @@ class TripStatsManager:
                 trip["end_soc_before_charging"] = True
         # The real reading, not the adjusted one, is what the next trip and
         # the parked baseline start from.
-        return self._finalise(trip, snapshot)
+        return self._finalise(trip, snapshot, start)
 
     def _finalise(
-        self, trip: dict[str, Any] | None, end: TripSnapshot
+        self,
+        trip: dict[str, Any] | None,
+        end: TripSnapshot,
+        start: TripSnapshot | None = None,
     ) -> dict[str, Any] | None:
         """Common tail for close / detect_missed_trip / force_close_if_stale:
         rebase the since-charge baseline to ``end``, mark ``end`` as the latest
@@ -2015,6 +2187,9 @@ class TripStatsManager:
             }
         self.last_parked_snapshot = end
         if trip is not None:
+            self.driving_since_charge = add_trip_to_driving_tally(
+                getattr(self, "driving_since_charge", None), trip, start, end
+            )
             self.last_trip = trip
             self._fire_event(trip)
         return trip
@@ -2056,7 +2231,7 @@ class TripStatsManager:
             last_charge=self.last_charge,
             retrospective=True,
         )
-        return self._finalise(trip, snapshot)
+        return self._finalise(trip, snapshot, start)
 
     def force_close_if_stale(
         self,
@@ -2096,7 +2271,7 @@ class TripStatsManager:
             last_charge=self.last_charge,
             retrospective=True,
         )
-        return self._finalise(trip, end)
+        return self._finalise(trip, end, start)
 
     def _fire_event(self, trip: dict[str, Any]) -> None:
         try:

@@ -29,7 +29,7 @@ That is why the idle interval matters, and why a longer one is the first thing t
 
 ### Reachability sensor
  
-The **Reachability** sensor surfaces this at a glance, so you can tell when data may be stale rather than wondering why things have gone quiet. It has three states:
+The **Reachability** sensor surfaces this at a glance, so you can tell when data may be stale rather than wondering why things have gone quiet. *(From 1.4.0-beta13 it's in the device's **Diagnostic** section, with Data Freshness and Data Refresh. Same entity ID, name and states, so nothing that uses it needs changing.)* It has three states:
  
 - **awake** — the car is powered on, or has reported activity recently
 - **likely_asleep** — the car has reported no activity for longer than the *data staleness threshold* (default 12 hours, configurable); its data may be out of date

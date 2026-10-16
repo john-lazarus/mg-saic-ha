@@ -44,7 +44,11 @@ from .logic import (
     is_unreported_zero,
 )
 from .utils import create_device_info
-from .trip_stats import compute_since_charge_efficiency, compute_soc_since_reset_efficiency
+from .trip_stats import (
+    compute_driving_since_charge,
+    compute_since_charge_efficiency,
+    compute_soc_since_reset_efficiency,
+)
 
 
 def _stopped_per_status(coordinator):
@@ -759,6 +763,12 @@ async def async_setup_entry(hass, entry, async_add_entities):
                 sensors.append(
                     SAICMGEfficiencySinceChargeSensor(coordinator, entry)
                 )
+                # The same split into driving and parked (MG IM6 owner, Oct
+                # 2026: 18 hours parked counted against 26 km).
+                sensors.append(
+                    SAICMGDrivingEfficiencySinceChargeSensor(coordinator, entry)
+                )
+                sensors.append(SAICMGParkedEnergySinceChargeSensor(coordinator, entry))
                 # How much energy the last charge put IN (#262) — measured
                 # across the session, since the API only reports energy taken
                 # back out afterwards.
@@ -3253,6 +3263,10 @@ class SAICMGVehicleReachabilitySensor(CoordinatorEntity, SensorEntity):
 
     _attr_icon = "mdi:sleep"
     _attr_device_class = SensorDeviceClass.ENUM
+    # In the Diagnostic section since 1.4.0-beta13, with Data Freshness and
+    # Data Refresh: it describes the connection to the car. Same entity ID,
+    # name and states.
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
     # Lets Home Assistant translate the raw state values (which must stay
     # lowercase snake_case, since automations/templates match on them) into
     # friendly display labels via translations/<lang>.json -> entity.sensor.
@@ -3682,7 +3696,11 @@ class SAICMGEfficiencySinceChargeSensor(CoordinatorEntity, SensorEntity):
 
     def __init__(self, coordinator, entry):
         super().__init__(coordinator)
-        self._name = "Efficiency Since Last Charge"
+        # "(Driving and Parked)" since 1.4.0-beta13, beside the Driving Only
+        # one: the car's counters include energy used while parked. Only the
+        # name shown changed; the unique ID, so the entity ID of an existing
+        # install, is the same.
+        self._name = "Efficiency Since Last Charge (Driving and Parked)"
         self._attr_icon = "mdi:gauge"
         self._attr_device_class = ENERGY_DISTANCE_DEVICE_CLASS
         self._attr_native_unit_of_measurement = "km/kWh"
@@ -3739,6 +3757,100 @@ class SAICMGEfficiencySinceChargeSensor(CoordinatorEntity, SensorEntity):
     @property
     def extra_state_attributes(self):
         return self._compute()
+
+
+class _DrivingSinceChargeBase(CoordinatorEntity, SensorEntity):
+    """Shared by the two sensors that split the energy since the last charge
+    into driving and parked (see trip_stats.compute_driving_since_charge)."""
+
+    def __init__(self, coordinator, entry, name, key):
+        super().__init__(coordinator)
+        vin_info = coordinator.vin_info
+        self._attr_name = f"{vin_info.brandName} {vin_info.modelName} {name}"
+        self._attr_unique_id = f"{entry.entry_id}_{vin_info.vin}_{key}"
+        self._device_info = create_device_info(coordinator, entry.entry_id)
+
+    @property
+    def device_info(self):
+        return self._device_info
+
+    @property
+    def available(self):
+        # Unknown rather than unavailable when there's nothing to show yet
+        # (no charging data, or no drive since the charge).
+        return True
+
+    def _compute(self):
+        data = self.coordinator.data or {}
+        total_km, total_kwh = self.coordinator._extract_since_charge(data.get("charging"))
+        trip_stats = getattr(self.coordinator, "trip_stats", None)
+        return compute_driving_since_charge(
+            getattr(trip_stats, "driving_since_charge", None),
+            total_km,
+            total_kwh,
+            open_trip_start=getattr(trip_stats, "open_snapshot", None),
+        )
+
+    @property
+    def extra_state_attributes(self):
+        return self._compute()
+
+
+class SAICMGDrivingEfficiencySinceChargeSensor(_DrivingSinceChargeBase):
+    """Efficiency since the last charge, counting only the drives.
+
+    The trips since the charge added up -- each trip's energy is the car's
+    own since-charge counter across that drive -- so the energy used while
+    parked is left out. Efficiency Since Last Charge (Driving and Parked)
+    divides everything the car has used since the charge by the same
+    distance.
+    """
+
+    def __init__(self, coordinator, entry):
+        super().__init__(
+            coordinator,
+            entry,
+            "Efficiency Since Last Charge (Driving Only)",
+            "efficiency_since_charge_driving",
+        )
+        self._attr_icon = "mdi:gauge"
+        self._attr_device_class = ENERGY_DISTANCE_DEVICE_CLASS
+        self._attr_native_unit_of_measurement = "km/kWh"
+        self._attr_state_class = "measurement"
+
+    @property
+    def native_value(self):
+        result = self._compute()
+        return None if result is None else result["efficiency_km_per_kWh"]
+
+
+class SAICMGParkedEnergySinceChargeSensor(_DrivingSinceChargeBase):
+    """Energy the car has used while not being driven, since the last charge.
+
+    Everything since the charge (the car's counter) less what the drives
+    used: keeping the 12 V battery topped up, battery management, and
+    climate run while parked. Frozen during a drive, which isn't parked.
+    No state class: it starts again at each charge, and a drive whose
+    energy comes from the battery level rather than the counter can move it
+    a little either way, which long-term statistics would misread.
+    """
+
+    def __init__(self, coordinator, entry):
+        super().__init__(
+            coordinator,
+            entry,
+            "Parked Energy Since Last Charge",
+            "parked_energy_since_charge",
+        )
+        self._attr_icon = "mdi:car-clock"
+        self._attr_device_class = SensorDeviceClass.ENERGY
+        self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+        self._attr_suggested_display_precision = 2
+
+    @property
+    def native_value(self):
+        result = self._compute()
+        return None if result is None else result["parked_energy_kWh"]
 
 
 class SAICMGBatteryEnergySensor(CoordinatorEntity, SensorEntity):

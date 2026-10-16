@@ -34,7 +34,7 @@ Common problems, how to turn on debug logging, and the diagnostic tools shipped 
 
 ## Charging figures reset to 0 without a charge
 
-Some cars reset their own **Mileage Since Last Charge** and **Power Usage Since Last Charge** counters to 0 — taking **Efficiency Since Last Charge** with them — even though they haven't been charged. This comes from the car, not Home Assistant: SAIC returns a normal, successful response in which the counters have been zeroed, as if a charge had just finished.
+Some cars reset their own **Mileage Since Last Charge** and **Power Usage Since Last Charge** counters to 0 — taking **Efficiency Since Last Charge (Driving and Parked)** with them — even though they haven't been charged. This comes from the car, not Home Assistant: SAIC returns a normal, successful response in which the counters have been zeroed, as if a charge had just finished.
 
 A debug log from an MG HS PHEV (#262) caught it happening. After a SAIC outage lasting about two hours (`return code 6`, then `return code 4`), the first successful response showed the counters reset to 0, `lastChargeEndingPower` reset to the battery's current energy, and a charge record stamped *during* the outage with no start time — while battery percentage, charging status, plug state and odometer were all **unchanged**. A genuine charge in the same log had a real start and end time.
 
@@ -54,7 +54,7 @@ It's deliberately cautious: **whenever the evidence is unclear, the reset is acc
 
 ## Mileage Since Last Charge shows the odometer
 
-A second fault with the same counter: sometimes SAIC sends the car's **odometer** as Mileage Since Last Charge, so it suddenly shows thousands of miles and **Efficiency Since Last Charge** goes with it. An MG HS PHEV (#262) did this after one charge (61120 = odometer 61120, i.e. 6,112 km / 3,797.8 mi) and kept it up — rising with the odometer as the car was driven — until it was next plugged in, when it reset properly to 0. Its next charge ended correctly, so it doesn't happen every time.
+A second fault with the same counter: sometimes SAIC sends the car's **odometer** as Mileage Since Last Charge, so it suddenly shows thousands of miles and **Efficiency Since Last Charge (Driving and Parked)** goes with it. An MG HS PHEV (#262) did this after one charge (61120 = odometer 61120, i.e. 6,112 km / 3,797.8 mi) and kept it up — rising with the odometer as the car was driven — until it was next plugged in, when it reset properly to 0. Its next charge ended correctly, so it doesn't happen every time.
 
 **From 1.3.0-beta3 the integration spots it** — a figure exactly equal to the odometer is never trusted — and shows the real distance instead, worked out from the odometer at your last charge (for that car's first drive afterwards: 3.0 km rather than 6,115 km). The odometer at your last charge is remembered across restarts. If the fault is already happening when you first install this version, there's no last-charge figure to work from yet, so the sensor keeps its previous value rather than showing the odometer; it corrects itself at your next charge.
 
