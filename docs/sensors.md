@@ -58,7 +58,7 @@ Last Powered On, Last Powered Off and Last Vehicle Activity are saved by the int
 - Charging Current Limit
 - Charging Power
 - Requested Charging Current *(from 1.3.0-beta12; **MGS6 only for now** — see [Sensors that depend on the model](#sensors-that-depend-on-the-model))*
-- Charger Input Voltage / Charger Input Current / Charger Input Power *(from 1.3.0-beta12; AC side of the on-board charger; **MGS6 only for now** — see [Sensors that depend on the model](#sensors-that-depend-on-the-model))*
+- Charger Input Voltage / Charger Input Current / Charger Input Power *(from 1.3.0-beta12; AC side of the on-board charger; **MGS6, and MG4 Electric from 1.4.0-beta15** — see [Sensors that depend on the model](#sensors-that-depend-on-the-model))*
 - Estimated Range After Charging *(the range expected when the current charge completes — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
 - Target SOC *(read-only mirror of the Target SOC slider — shown only on models where the iSmart app supports it)*
 - Charging Duration *(the car's own counter: it starts again from zero if charging pauses and restarts, even for a few seconds — for the whole charge see **Charge Session Duration** and **Last Charge Duration** below)*
@@ -331,15 +331,15 @@ Some of what the car sends means different things on different models, or is on 
 | Sensor | Models | What it is | How it was checked |
 |---|---|---|---|
 | **Requested Charging Current** | MGS6 EV | The current the battery is asking the charger for, at the pack's voltage. Compare it with **Charging Current**, not with the amps a wall charger shows. Reads 0 when not charging | Read 5.1–5.25 A beside a Charging Current of 5.0–5.4 A |
-| **Charger Input Voltage** | MGS6 EV | Mains voltage at the on-board charger (AC charging) | 234–240 V with the wall charger showing 238 V |
-| **Charger Input Current** | MGS6 EV | Mains current into the on-board charger (AC charging) | 10.2 A with the wall charger showing 10.5 A |
-| **Charger Input Power** | MGS6 EV | The two above multiplied. Compare it with **Charging Power** (what reaches the battery) to see what the on-board charger loses | 2.43 kW with the wall charger showing 2.5 kW |
+| **Charger Input Voltage** | MGS6 EV, MG4 Electric *(from 1.4.0-beta15)* | Mains voltage at the on-board charger (AC charging) | MGS6: 234–240 V with the wall charger showing 238 V. MG4: 230–234 V on a home charger |
+| **Charger Input Current** | MGS6 EV, MG4 Electric *(from 1.4.0-beta15)* | Mains current into the on-board charger (AC charging) | MGS6: 10.2 A with the wall charger showing 10.5 A. MG4: 29.6–30 A on a 32 A home charger |
+| **Charger Input Power** | MGS6 EV, MG4 Electric *(from 1.4.0-beta15)* | The two above multiplied. Compare it with **Charging Power** (what reaches the battery) to see what the on-board charger loses | MGS6: 2.43 kW with the wall charger showing 2.5 kW. MG4: about 6.9 kW in, beside 6.5 kW reaching the battery |
 | **Handbrake** *(binary sensor)* | MG HS PHEV | Parking brake on / off | On when parked, off when driving, in an owner's logs |
 
 Why not everywhere:
 
-- **Requested Charging Current:** the same raw value means about 5 A on an MGS6 and would have to mean about 16 A on an HS PHEV, so there is no one scale.
-- **Handbrake:** an MGS6 reports "off" whether it is parked, driving or charging.
+- **Requested Charging Current:** the same raw value means about 5 A on an MGS6 and would have to mean about 16 A on an HS PHEV, so there is no one scale. On an MG4 it fits neither, so it isn't shown there either.
+- **Handbrake:** an MGS6 and an MG4 both report "off" whether they are parked, driving or charging.
 
 **Want one of these on your model?** Open an issue with a debug log that covers the car doing the thing (charging on AC with your charger's own current and voltage noted, or parked then driving for the handbrake). That is what is needed to add it.
 
