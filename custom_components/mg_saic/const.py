@@ -322,6 +322,17 @@ VEHICLE_PROFILES = {
         "supports_target_soc": False,
     },
     "EH32": {  # MG4 Electric
+        # Charger input readings (#408), same scales as the MGS6. Checked on
+        # an owner's log (#419), 11 Oct 2026, AC charging overnight:
+        #   onBdChrgrAltrCrntInptCrnt 148-150 x0.2 -> 29.6-30 A (a 32 A charger)
+        #   onBdChrgrAltrCrntInptVol  115-117 x2   -> 230-234 V
+        #   so about 6.9 kW in, beside 6.5 kW reaching the pack
+        #   (bmsPackCrnt 19665 -> 16.75 A at bmsPackVol 1550 -> 387.5 V).
+        # NOT the requested current: bmsChrgOtptCrntReq read 108-116 beside
+        # those 16-17 A, which fits neither x0.05 (5.8 A) nor x0.5 (58 A).
+        # Nor the handbrake: handBrake read 0 parked and driving.
+        "obc_input_current_factor": 0.2,
+        "obc_input_voltage_factor": 2.0,
         "min_temp": 17,
         "max_temp": 33,
         "temp_offset": 3,

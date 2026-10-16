@@ -160,9 +160,10 @@ The car never tells SAIC when it starts charging, and on an MG HS PHEV every liv
 **What still reaches the car:**
 - A car switched on during the quiet time is polled as normal.
 - **Update Vehicle Data** and any command you send.
-- The checks after you switch the car off.
 
-If one of those finds the car charging, the "has it finished?" check is set up from it, just as for quiet charging's own poll *(from 1.4.0-beta4)*. So an automation that presses **Update Vehicle Data** when your charger starts charging gives you the charge-start poll straight away, and quiet charging takes it from there.
+**The checks after you switch the car off** *(from 1.4.0-beta15)*: switching the car off normally sets off a few extra live polls over the next 25 minutes, to spot you plugging in. While Quiet Charging is on they stop, including ones left over from switching off just before the start time. Quiet Charging is already watching the stored status for a plug-in, so nothing is missed. Up to 1.4.0-beta14 they carried on, and on an MG HS PHEV switched off at 18:50 with Quiet Charging from 19:00, two of them reached the car mid-charge at 19:06 and 19:16 (#269).
+
+If **Update Vehicle Data** or a command finds the car charging, the "has it finished?" check is set up from it, just as for quiet charging's own poll *(from 1.4.0-beta4)*. So an automation that presses **Update Vehicle Data** when your charger starts charging gives you the charge-start poll straight away, and quiet charging takes it from there.
 
 **Worth knowing:**
 - The stored status updates itself at the start of a charge on an MGS6 and an MG HS PHEV. Other models are still to be confirmed; a model that doesn't simply won't show a charge until the end time.
