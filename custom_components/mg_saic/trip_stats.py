@@ -146,7 +146,11 @@ class TripSnapshot:
     since_charge_kwh: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        # Optional India metadata stays outside the global dataclass/constructor.
+        data = asdict(self)
+        if getattr(self, "india_provenance", None) is not None:
+            data["india_provenance"] = self.india_provenance
+        return data
 
     @classmethod
     def from_dict(cls, d: dict[str, Any] | None) -> "TripSnapshot | None":
@@ -158,7 +162,7 @@ class TripSnapshot:
             return None if v is None else float(v)
 
         try:
-            return cls(
+            snapshot = cls(
                 ts=d["ts"],
                 odometer_km=float(d["odometer_km"]),
                 soc_pct=_f("soc_pct"),
@@ -166,6 +170,9 @@ class TripSnapshot:
                 since_charge_km=_f("since_charge_km"),
                 since_charge_kwh=_f("since_charge_kwh"),
             )
+            if isinstance(d.get("india_provenance"), dict):
+                snapshot.india_provenance = d["india_provenance"]
+            return snapshot
         except (KeyError, TypeError, ValueError):
             return None
 
@@ -195,7 +202,11 @@ class ChargeSnapshot:
     record_end: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        # Optional India metadata stays outside the global dataclass/constructor.
+        data = asdict(self)
+        if getattr(self, "india_provenance", None) is not None:
+            data["india_provenance"] = self.india_provenance
+        return data
 
     @classmethod
     def from_dict(cls, d: dict[str, Any] | None) -> "ChargeSnapshot | None":
@@ -207,7 +218,7 @@ class ChargeSnapshot:
             return None if v is None else float(v)
 
         try:
-            return cls(
+            snapshot = cls(
                 ts=d["ts"],
                 soc_pct=_f("soc_pct"),
                 pack_energy_kwh=_f("pack_energy_kwh"),
@@ -216,6 +227,9 @@ class ChargeSnapshot:
                 record_start=_f("record_start"),
                 record_end=_f("record_end"),
             )
+            if isinstance(d.get("india_provenance"), dict):
+                snapshot.india_provenance = d["india_provenance"]
+            return snapshot
         except (KeyError, TypeError, ValueError):
             return None
 
@@ -619,7 +633,7 @@ def charge_end_from_stopped(
         and stopped_epoch is not None
         and current.record_end <= stopped_epoch + STOPPED_RECORD_MARGIN_S
     )
-    return replace(
+    selected = replace(
         current,
         ts=stopped.ts,
         soc_pct=stopped.soc_pct,
@@ -634,6 +648,29 @@ def charge_end_from_stopped(
         record_start=current.record_start if keep_record else None,
         record_end=current.record_end if keep_record else None,
     )
+    current_origins = getattr(current, "india_provenance", None)
+    stopped_origins = getattr(stopped, "india_provenance", None)
+    if current_origins is not None or stopped_origins is not None:
+        current_origins = current_origins or {}
+        stopped_origins = stopped_origins or {}
+        unknown = {"source": "unknown"}
+        origins = dict(current_origins)
+        origins["ts"] = stopped_origins.get(
+            "ts", {"source": "snapshot", "field": "ts", "value": stopped.ts}
+        )
+        for field in ("soc_pct", "pack_energy_kwh", "range_km"):
+            origins[field] = stopped_origins.get(field, unknown)
+        origins["odometer_km"] = (
+            stopped_origins if stopped.odometer_km is not None else current_origins
+        ).get("odometer_km", unknown)
+        for field in ("record_start", "record_end"):
+            origin = current_origins.get(field, unknown)
+            origins[field] = origin if keep_record else {
+                "source": "filtered", "operation": "record did not end by stopped reading",
+                "input": origin,
+            }
+        selected.india_provenance = origins
+    return selected
 
 
 # The since-charge distance counter reads in tenths of a km; it can move this
@@ -987,6 +1024,31 @@ def compute_completed_trip(
         trip["retrospective"] = True
         trip["timing"] = "approximate"
 
+    if getattr(start, "india_provenance", None) is not None or getattr(end, "india_provenance", None) is not None:
+        trip["india_provenance"] = {
+            "start": getattr(start, "india_provenance", None),
+            "end": getattr(end, "india_provenance", None),
+            "baseline": (baseline or {}).get("india_provenance"),
+            "calculations": {
+                "distance_km": {
+                    "operation": "counter_delta" if counter_km is not None else "odometer_delta",
+                    "inputs": (["end.since_charge_km", "baseline.since_charge_km"] if counter_km is not None
+                               else ["end.odometer_km", "start.odometer_km"]),
+                },
+                "energy_kWh": {
+                    "operation": "counter_delta" if not retrospective and not counter_reset_detected and raw_counter_kwh is not None else "soc_capacity",
+                    "inputs": (["end.since_charge_kwh", "start.since_charge_kwh" if parked_before_kwh is not None else "baseline.since_charge_kwh"]
+                               if not retrospective and not counter_reset_detected and raw_counter_kwh is not None
+                               else ["start.soc_pct", "end.soc_pct", "end.capacity_kwh"]),
+                },
+                "energy_counter": ("end.since_charge_kwh - start.since_charge_kwh" if parked_before_kwh is not None
+                                   else "counter_delta(end.since_charge_kwh, baseline.since_charge_kwh); current value after counter reset or missing baseline"),
+                "soc_used_pct": "start.soc_pct - end.soc_pct",
+                "energy_soc": "soc_used_pct / 100 * end.capacity_kwh",
+                "efficiency": "selected distance / selected energy; _counter and _soc use their respective inputs",
+                "fuel": "(start.fuel_pct - end.fuel_pct) / 100 * end.tank_litres",
+            },
+        }
     return trip
 
 
@@ -1073,6 +1135,12 @@ def add_trip_to_driving_tally(
         if approximate:
             tally["approximate_trips"] += 1
     tally["since_charge_km"] = round(end_km, 3)
+    if trip.get("india_provenance") is not None:
+        previous = tally.get("india_provenance", {})
+        tally["india_provenance"] = {
+            "trips": [*previous.get("trips", []), trip["india_provenance"]],
+            "since_charge_km": (getattr(end, "india_provenance", None) or {}).get("since_charge_km"),
+        }
     return tally
 
 
@@ -1136,6 +1204,13 @@ def compute_driving_since_charge(
                 driving_kwh / (driving_km / KM_PER_MILE) * 100.0, 2
             ),
         })
+    if tally.get("india_provenance") is not None:
+        result["india_provenance"] = {
+            "tally": tally["india_provenance"],
+            "parked_reference": (getattr(open_trip_start, "india_provenance", None) or {}).get("since_charge_kwh")
+                                if open_start_kwh is not None and open_start_kwh <= total_kwh else None,
+            "calculation": "driving distance / driving energy; parked energy = max(0, reference energy - driving energy)",
+        }
     return result
 
 
@@ -1324,6 +1399,22 @@ def compute_charge_session(
     # only a lower bound, and the power worked out from it would be too high.
     if duration_s and duration_s > 0 and energy and not missed_start:
         result["average_power_kW"] = round(energy / (duration_s / 3600.0), 2)
+    if getattr(start, "india_provenance", None) is not None or getattr(end, "india_provenance", None) is not None:
+        result["india_provenance"] = {
+            "start": getattr(start, "india_provenance", None), "end": getattr(end, "india_provenance", None),
+            "power_record": power_record,
+            "capacity_kwh": {
+                "value": capacity_kwh,
+                "origin": (getattr(end, "india_provenance", None) or {}).get("capacity_kwh", {"source": "unknown"}),
+            },
+            "calculations": {
+                "energy_soc": "(end.soc_pct - start.soc_pct) / 100 * capacity_kwh",
+                "energy_counter": "end.pack_energy_kwh - start.pack_energy_kwh",
+                "range_added": "end.range_km - start.range_km",
+                "average_power": "selected energy / duration_s * 3600",
+                "energy_measured": "trapezoidal integral of charge voltage * current at power_record source times; existing edge estimates",
+            },
+        }
     return result
 
 
@@ -1465,6 +1556,15 @@ def reconstruct_unseen_charge(
             result["range_added_km"] = range_added
     if before.odometer_km is not None:
         result["odometer_km"] = before.odometer_km
+    if getattr(before, "india_provenance", None) is not None or getattr(after, "india_provenance", None) is not None:
+        result["india_provenance"] = {
+            "start": getattr(before, "india_provenance", None), "end": getattr(after, "india_provenance", None),
+            "calculations": {
+                "energy_soc": "(end.soc_pct - start.soc_pct) / 100 * end.capacity_kwh",
+                "energy_counter": "end.pack_energy_kwh - start.pack_energy_kwh",
+                "range_added": "end.range_km - start.range_km",
+            },
+        }
     return result
 
 
@@ -1681,7 +1781,7 @@ class TripStatsManager:
             }
         )
 
-    def note_since_charge(self, km, kwh) -> bool:
+    def note_since_charge(self, km, kwh, *, india_provenance=None) -> bool:
         """Track the since-charge counters each poll to catch a charge reset.
 
         When the counter drops below the stored baseline, a charge has zeroed it,
@@ -1695,16 +1795,20 @@ class TripStatsManager:
                 "since_charge_km": round(km, 3),
                 "since_charge_kwh": round(kwh, 3) if kwh is not None else 0.0,
             }
+            if india_provenance is not None:
+                self.since_charge_baseline["india_provenance"] = india_provenance
             return True
         if km < self.since_charge_baseline.get("since_charge_km", 0.0):
             self.since_charge_baseline = {
                 "since_charge_km": round(km, 3),
                 "since_charge_kwh": round(kwh, 3) if kwh is not None else 0.0,
             }
+            if india_provenance is not None:
+                self.since_charge_baseline["india_provenance"] = india_provenance
             return True
         return False
 
-    def note_soc_reset_baseline(self, soc_pct, odometer_km, ts, is_charging=None) -> bool:
+    def note_soc_reset_baseline(self, soc_pct, odometer_km, ts, is_charging=None, *, india_provenance=None) -> bool:
         """Track SOC while parked to detect a charge and rebase the SOC-based
         "since reset" baseline — the odometer/SOC-only counterpart to
         note_since_charge, entirely independent of the since-charge counter
@@ -1739,8 +1843,11 @@ class TripStatsManager:
             "odometer_km": round(odometer_km, 3),
         }
 
+        if india_provenance is not None:
+            self.last_parked_soc_reading["india_provenance"] = india_provenance
+
         if self.soc_reset_baseline is None:
-            self.soc_reset_baseline = self._new_soc_baseline(soc_pct, odometer_km, ts)
+            self.soc_reset_baseline = self._new_soc_baseline(soc_pct, odometer_km, ts, india_provenance=india_provenance)
             return True
 
         # Rebase on a rise above the LOWEST SOC seen since the baseline was
@@ -1756,7 +1863,7 @@ class TripStatsManager:
         # own but the total gain does.
         # The car says it is charging — no inference needed.
         if is_charging:
-            self.soc_reset_baseline = self._new_soc_baseline(soc_pct, odometer_km, ts)
+            self.soc_reset_baseline = self._new_soc_baseline(soc_pct, odometer_km, ts, india_provenance=india_provenance)
             return True
 
         low = self.soc_reset_baseline.get(
@@ -1786,19 +1893,22 @@ class TripStatsManager:
                 and abs(odometer_km - previous["odometer_km"]) < REGEN_ODOMETER_MOVED_KM
                 and soc_pct > previous["soc_pct"]
             ):
-                self.soc_reset_baseline = self._new_soc_baseline(soc_pct, odometer_km, ts)
+                self.soc_reset_baseline = self._new_soc_baseline(soc_pct, odometer_km, ts, india_provenance=india_provenance)
             return True  # held (regen, or nothing new) — or rebased, above
 
         # Still discharging: track the new low so the next charge is measured
         # from the bottom of this cycle.
         if soc_pct < low:
             self.soc_reset_baseline["soc_low_pct"] = round(soc_pct, 1)
+            if india_provenance is not None:
+                self.soc_reset_baseline.setdefault("india_provenance", {})["soc_low_pct"] = india_provenance.get("soc_pct", {})
             return True
         return True
 
     @staticmethod
-    def _new_soc_baseline(soc_pct, odometer_km, ts) -> dict[str, Any]:
+    def _new_soc_baseline(soc_pct, odometer_km, ts, *, india_provenance=None) -> dict[str, Any]:
         return {
+            **({"india_provenance": {**india_provenance, "soc_low_pct": india_provenance.get("soc_pct", {})}} if india_provenance is not None else {}),
             "soc_pct": round(soc_pct, 1),
             "odometer_km": round(odometer_km, 3),
             "ts": ts,
@@ -1821,6 +1931,12 @@ class TripStatsManager:
             stretch_s=stretch_s,
         )
         if progress is not None:
+            if getattr(snapshot, "india_provenance", None) is not None:
+                progress["india_provenance"] = {
+                    "start": getattr(self.open_charge, "india_provenance", None) if self.open_charge else None,
+                    "end": getattr(snapshot, "india_provenance", None),
+                    "calculation": "charge record stretches and elapsed chargingDuration, or session boundary duration",
+                }
             self.charge_progress = progress
 
     def charge_session(self) -> dict[str, Any] | None:
@@ -1844,7 +1960,7 @@ class TripStatsManager:
             "paused_s": int(charge.get("paused_s") or 0),
             "in_progress": False,
         }
-        for key in ("duration_source", "charge_start_ts", "charge_end_ts"):
+        for key in ("duration_source", "charge_start_ts", "charge_end_ts", "india_provenance"):
             if charge.get(key) is not None:
                 session[key] = charge[key]
         return session
@@ -1997,6 +2113,10 @@ class TripStatsManager:
 
         # A charge is open and the car is not charging. Paused, or over?
         current = snapshot
+        capacity_input = ({
+            "value": capacity_kwh,
+            "origin": snapshot.india_provenance.get("capacity_kwh", {"source": "unknown"}),
+        } if getattr(snapshot, "india_provenance", None) is not None else None)
         end = snapshot
         paused = getattr(self, "charge_paused_snapshot", None)
         if charge_paused:
@@ -2057,6 +2177,8 @@ class TripStatsManager:
         )
         if charge is None:
             return None, True
+        if capacity_input is not None:
+            charge.setdefault("india_provenance", {})["capacity_kwh"] = capacity_input
         self.last_charge = charge
         return charge, True
 
@@ -2145,6 +2267,13 @@ class TripStatsManager:
             and before_charge.soc_pct < snapshot.soc_pct
         ):
             end = replace(snapshot, soc_pct=before_charge.soc_pct)
+            if getattr(snapshot, "india_provenance", None) is not None:
+                origin = (getattr(before_charge, "india_provenance", None) or {}).get("soc_pct", {
+                    "source": "unknown", "measurement_time": None,
+                })
+                end.india_provenance = {
+                    **getattr(snapshot, "india_provenance", None), "soc_pct": {**origin, "substitution": "before_charge"},
+                }
             soc_before_charge = True
 
         trip = compute_completed_trip(
@@ -2185,6 +2314,8 @@ class TripStatsManager:
                     else 0.0
                 ),
             }
+            if getattr(end, "india_provenance", None) is not None:
+                self.since_charge_baseline["india_provenance"] = getattr(end, "india_provenance", None)
         self.last_parked_snapshot = end
         if trip is not None:
             self.driving_since_charge = add_trip_to_driving_tally(
