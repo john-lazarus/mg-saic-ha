@@ -50,6 +50,10 @@ It's deliberately cautious: **whenever the evidence is unclear, the reset is acc
 
 **How to tell when it's happened:** the log shows a warning — *"since-charge counters reset without a charge … holding the previous figures"* — with the raw and held values, and the **Charging Data Freshness** sensor's attributes show `counter_reset_held: true` and `ignored_counter_reset_at`. If you ever see a genuine charge not reset the counters, please open an issue with a debug log.
 
+**Small dips are not resets** *(fixed in 1.4.0-beta14, #436)*. Some cars' counters wobble down a little now and then: an MG4's Power Usage Since Last Charge went 25.0 → 24.9 → 25.0 → 24.9 kWh. Before beta14 any fall at all was taken as a reset, so each wobble added the whole previous figure on top: after nine of them the car's 45.0 kWh showed as 297.9 kWh, and Efficiency Since Last Charge as 0.75 km/kWh. Now a counter only counts as reset when it falls to **less than half** of what it was (a real reset goes back to about zero). A smaller dip keeps the previous figure on show until the car's own figure passes it again, so the sensor never goes backwards.
+
+If your figures were inflated this way, beta14 **repairs them automatically** on the first start: a real reset always takes the distance and energy counters back together, so a hold on only one of them can only have come from wobbles, and it's cleared (the log says *"cleared a since-charge hold built up by the car's figure wobbling"*). Two things it can't undo: the long-term statistics already recorded for **Power Usage Since Last Charge** keep the jumps (you can correct them under **Developer Tools → Statistics**), and the **Last Trip** figures for drives during that time were inflated too — the next drive is right again.
+
 **Efficiency Since Charge (SOC)** never reads these counters at all — it works from battery percentage and odometer — so it's a useful cross-check. See [Trip & efficiency statistics](sensors.md#trip--efficiency-statistics).
 
 ## Mileage Since Last Charge shows the odometer
