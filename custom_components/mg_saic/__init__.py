@@ -642,7 +642,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
     if not domain.get("clients_by_vin") and not india_setup_owns_client:
         await async_unload_services(hass)
-        # ponytail: retain India account locks for HA lifetime; queued waiters need stable identities.
+        # retain India account locks for HA lifetime; queued waiters need stable identities.
         retain_india_locks = any(key[1] == REGION_INDIA for key in domain.get("account_locks", {}))
         for key in (
             "clients_by_vin",
