@@ -17,6 +17,7 @@ from saic_ismart_client_ng.api.vehicle_charging import (
 )
 from .api import CommandsLimitReachedException, VehicleNotLockedException
 from .backends import Feature
+from .errors import is_india_backend, raise_india_command_error
 from .utils import create_device_info
 
 
@@ -72,6 +73,8 @@ async def async_setup_entry(hass, entry, async_add_entities):
         mode_options = ["Off", "Cool", "Fan only", "Heat/cool"]
         if coordinator.climate_status_heat:
             mode_options.append("Heat")
+        if is_india_backend(client):
+            mode_options = ["Off", "Heat/cool"]
         select_entities.append(
             SAICMGClimateModeSelect(
                 coordinator, client, entry, vin_info, vin, mode_options
@@ -431,6 +434,10 @@ class SAICMGHeatedSeatLevelSelect(CoordinatorEntity, SelectEntity):
             return {0: "Off", 1: "Low", 2: "Medium", 3: "High"}.get(pending, "Off")
 
         status = status_for_controls(self.coordinator)
+        if is_india_backend(getattr(self, "_client", None)):
+            basic = getattr(status, "basicVehicleStatus", None)
+            level = getattr(basic, self._status_field, None)
+            return {0: "Off", 1: "Low", 2: "Medium", 3: "High"}.get(level)
         level = 0
         if status:
             basic_status = getattr(status, "basicVehicleStatus", None)
@@ -440,6 +447,8 @@ class SAICMGHeatedSeatLevelSelect(CoordinatorEntity, SelectEntity):
 
     async def async_select_option(self, option: str):
         """Store the chosen level locally (no command sent)."""
+        if is_india_backend(getattr(self, "_client", None)) and option not in {"Off", "Low", "Medium", "High"}:
+            raise_india_command_error(getattr(self, "_client", None), ValueError("Unsupported India heated-seat level"))
         level = {"Off": 0, "Low": 1, "Medium": 2, "High": 3}.get(option, 0)
         self.coordinator.pending_seat_levels[self._seat_key] = level
         LOGGER.debug(
@@ -523,8 +532,11 @@ class SAICMGClimateModeSelect(CoordinatorEntity, SelectEntity):
         """Set the climate mode by delegating to the climate entity."""
         climate = self.coordinator.climate_entity
         if climate is None:
+            raise_india_command_error(getattr(self, "_client", None), ValueError("Climate entity not ready"))
             LOGGER.warning("Climate entity not ready; cannot set the climate mode.")
             return
+        if is_india_backend(getattr(self, "_client", None)) and option not in self._attr_options:
+            raise_india_command_error(getattr(self, "_client", None), ValueError("Unsupported India climate mode"))
         hvac = CLIMATE_MODE_OPTION_TO_HVAC.get(option)
         if hvac is None:
             LOGGER.warning("Unknown climate mode option: %s", option)

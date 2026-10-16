@@ -1,5 +1,6 @@
 # File: config_flow.py
 
+import asyncio
 import logging
 from contextlib import suppress
 
@@ -8,6 +9,7 @@ from homeassistant import config_entries
 from homeassistant.core import callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from .backends import REGION_INDIA, create_backend
+from .errors import india_login_rejection
 from .backends.india import IndiaBackendNotReadyError, hash_india_pin
 from .const import (
     ABRP_DOC_URL,
@@ -320,11 +322,11 @@ class SAICMGConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         e,
                     )
                 except Exception as e:
-                    errors["base"] = "auth"
-                    LOGGER.error(
-                        "Failed to authenticate or fetch vehicle data (India): %s",
-                        e,
-                    )
+                    rejection = india_login_rejection(e)
+                    if rejection is not None and not any(text in str(rejection).lower() for text in ("incorrect password", "invalid password", "bad credentials")):
+                        return self.async_abort(reason="unknown")
+                    errors["base"] = "auth" if rejection is not None else "unknown"
+                    LOGGER.debug("India authentication failed", exc_info=True)
 
         data_schema = vol.Schema(
             {
@@ -335,7 +337,7 @@ class SAICMGConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="india_pin", data_schema=data_schema, errors=errors
         )
 
-    async def fetch_vehicle_data_india(self):
+    async def fetch_vehicle_data_india(self, *, account_replacement=False):
         """Authenticate against the MG India TAP backend and fetch vehicles.
 
         Uses the same backend factory as runtime setup so the config flow
@@ -354,19 +356,31 @@ class SAICMGConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 "india_pin_hash": self.india_pin_hash,
             }
         )
+        domain = self.hass.data.setdefault(DOMAIN, {})
+        key = (self.username, REGION_INDIA)
+        lock = domain.setdefault("account_locks", {}).setdefault(key, asyncio.Lock())
+        backend.set_api_lock(lock)
         try:
-            await backend.login()
-            vehicles = await backend.get_vehicle_info()
-            if not vehicles:
-                raise NoVehiclesFoundError(
-                    "India vehicle list returned no vehicles"
-                )
-            self.vehicle_options = build_vehicle_options(vehicles)
-            self.vehicles = list(self.vehicle_options)
-            LOGGER.info("Fetched India vehicle data successfully.")
+            async with lock:
+                if key in domain.get("india_reauth_in_progress", set()) and not account_replacement:
+                    raise ValueError("India account replacement is in progress")
+                await backend.login()
+                vehicles = await backend.get_vehicle_info()
+                if not vehicles:
+                    raise NoVehiclesFoundError("India vehicle list returned no vehicles")
+                self.vehicle_options = build_vehicle_options(vehicles)
+                self.vehicles = list(self.vehicle_options)
+                LOGGER.info("Fetched India vehicle data successfully.")
         finally:
-            with suppress(Exception):
-                await backend.close()
+            close = self.hass.async_create_task(backend.close())
+            try:
+                await asyncio.shield(close)
+            except asyncio.CancelledError:
+                with suppress(Exception, asyncio.CancelledError):
+                    await close
+                raise
+            except Exception:
+                LOGGER.debug("India validator cleanup failed", exc_info=True)
 
     async def async_step_select_vehicle(self, user_input=None):
         errors = {}
@@ -507,7 +521,8 @@ class SAICMGConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             try:
                 username_is_email = self.login_type == "email"
                 if self.region == REGION_INDIA:
-                    await self.fetch_vehicle_data_india()
+                    await self._replace_india_account_credentials()
+                    return self.async_abort(reason="reauth_successful")
                 else:
                     await self.fetch_vehicle_data(username_is_email)
             except NoVehiclesFoundError as e:  # noqa: BLE001 - surfaced as a form error
@@ -517,8 +532,14 @@ class SAICMGConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     e,
                 )
             except Exception as e:  # noqa: BLE001 - surfaced as a form error
-                errors["base"] = "auth"
-                LOGGER.error("Re-authentication failed: %s", e)
+                if self.region == REGION_INDIA:
+                    rejection = india_login_rejection(e)
+                    if rejection is not None and not any(text in str(rejection).lower() for text in ("incorrect password", "invalid password", "bad credentials")):
+                        return self.async_abort(reason="unknown")
+                    LOGGER.debug("India account replacement failed", exc_info=True)
+                else:
+                    LOGGER.error("Re-authentication failed: %s", e)
+                errors["base"] = ("auth" if self.region != REGION_INDIA or rejection is not None else "unknown")
             else:
                 return self.async_update_reload_and_abort(
                     self._existing_entry,
@@ -533,6 +554,94 @@ class SAICMGConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             description_placeholders={"username": self.username or ""},
             errors=errors,
         )
+
+    async def _replace_india_account_credentials(self):
+        """Replace one India account coherently, then recover enabled siblings."""
+        domain = self.hass.data.setdefault(DOMAIN, {})
+        key = (self.username, REGION_INDIA)
+        login_lock = domain.setdefault("account_login_locks", {}).setdefault(key, asyncio.Lock())
+        domain.setdefault("account_locks", {}).setdefault(key, asyncio.Lock())
+        guard = domain.setdefault("india_reauth_in_progress", set())
+        siblings = [entry for entry in self.hass.config_entries.async_entries(DOMAIN)
+                    if (entry.data.get("username"), entry.data.get("region")) == key]
+        unloaded = []
+        committed = False
+        failure = None
+        async with login_lock:
+            if key in guard or any(entry.entry_id in domain.get("setups_in_progress", set()) for entry in siblings):
+                raise ValueError("India account setup or replacement is already running")
+            guard.add(key)
+        try:
+            # Unload before validation: a temporary login invalidates the old
+            # account session, even if the new credentials are never committed.
+            for entry in siblings:
+                if entry.disabled_by is None and entry.entry_id in domain:
+                    unload = self.hass.async_create_task(
+                        self.hass.config_entries.async_unload(entry.entry_id)
+                    )
+                    try:
+                        unload_ok = await asyncio.shield(unload)
+                    except asyncio.CancelledError:
+                        try:
+                            if await unload:
+                                unloaded.append(entry)
+                        except (Exception, asyncio.CancelledError):
+                            LOGGER.debug("India unload interrupted", exc_info=True)
+                        raise
+                    if not unload_ok:
+                        raise ValueError("India sibling refused unload; credentials unchanged")
+                    unloaded.append(entry)
+            await self.fetch_vehicle_data_india(account_replacement=True)
+            if any(entry.data.get("vin") not in self.vehicles for entry in siblings):
+                raise NoVehiclesFoundError("A configured India vehicle is missing")
+            originals = [(entry, dict(entry.data)) for entry in siblings]
+            try:
+                for entry in siblings:
+                    self.hass.config_entries.async_update_entry(
+                        entry, data={**entry.data, "password": self.password},
+                    )
+                committed = True
+            except BaseException:
+                for entry, data in originals:
+                    self.hass.config_entries.async_update_entry(entry, data=data)
+                raise
+        except BaseException as exc:
+            failure = exc
+            raise
+        finally:
+            guard.discard(key)
+            # Reopen with the committed credentials, or the original credentials
+            # after refusal/failure. Recovery must not strand a sibling on cancel.
+            recover = ([entry for entry in siblings if entry.disabled_by is None]
+                       if committed else unloaded)
+            recovery = self.hass.async_create_task(self._recover_india_entries(recover))
+            try:
+                await asyncio.shield(recovery)
+            except asyncio.CancelledError:
+                with suppress(Exception, asyncio.CancelledError):
+                    await recovery
+                raise
+            except Exception:
+                if failure is None:
+                    raise
+                LOGGER.debug("India recovery failed after replacement failure", exc_info=True)
+
+    async def _recover_india_entries(self, entries):
+        error = None
+        cancellation = None
+        for entry in entries:
+            try:
+                if not await self.hass.config_entries.async_reload(entry.entry_id):
+                    raise ValueError("India sibling reload did not complete")
+            except asyncio.CancelledError as exc:
+                cancellation = exc
+            except Exception as exc:
+                error = exc
+                LOGGER.debug("India sibling recovery failed", exc_info=True)
+        if cancellation is not None:
+            raise cancellation
+        if error is not None:
+            raise error
 
     async def fetch_vehicle_data(self, username_is_email):
         """Authenticate and fetch vehicle data."""

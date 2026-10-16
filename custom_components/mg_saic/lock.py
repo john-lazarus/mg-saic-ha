@@ -8,6 +8,7 @@ from .const import (
     DOMAIN,
     LOGGER,
 )
+from .errors import raise_india_command_error
 from .utils import create_device_info
 
 
@@ -81,13 +82,16 @@ class SAICMGLockEntity(CoordinatorEntity, LockEntity):
                 immediate_interval,
                 long_interval,
             )
-        except CommandsLimitReachedException:
+        except CommandsLimitReachedException as err:
             await self.coordinator.notify_command_limit_reached(self._vin)
-        except VehicleNotLockedException:
+            raise_india_command_error(getattr(self, "_client", None), err)
+        except VehicleNotLockedException as err:
             await self.coordinator.notify_vehicle_not_locked(self._vin)
+            raise_india_command_error(getattr(self, "_client", None), err)
         except Exception as e:
             LOGGER.error("Error locking vehicle for VIN %s: %s", self._vin, e)
             self.coordinator.record_command_error("Error locking vehicle", e)
+            raise_india_command_error(getattr(self, "_client", None), e)
 
     async def async_unlock(self, **kwargs):
         """Unlock the vehicle."""
@@ -102,10 +106,13 @@ class SAICMGLockEntity(CoordinatorEntity, LockEntity):
                 immediate_interval,
                 long_interval,
             )
-        except CommandsLimitReachedException:
+        except CommandsLimitReachedException as err:
             await self.coordinator.notify_command_limit_reached(self._vin)
-        except VehicleNotLockedException:
+            raise_india_command_error(getattr(self, "_client", None), err)
+        except VehicleNotLockedException as err:
             await self.coordinator.notify_vehicle_not_locked(self._vin)
+            raise_india_command_error(getattr(self, "_client", None), err)
         except Exception as e:
             LOGGER.error("Error unlocking vehicle for VIN %s: %s", self._vin, e)
             self.coordinator.record_command_error("Error unlocking vehicle", e)
+            raise_india_command_error(getattr(self, "_client", None), e)
