@@ -160,6 +160,11 @@ async def async_setup_entry(hass, entry, async_add_entities):
         switches.append(
             SAICMGQuietChargingSwitch(coordinator, entry, vin_info, vin)
         )
+    # Negative Charging Values (#442): only when ticked in the options.
+    if getattr(coordinator, "negative_charging_switch", False):
+        switches.append(
+            SAICMGNegativeChargingValuesSwitch(coordinator, entry, vin_info, vin)
+        )
 
     async_add_entities(switches)
 
@@ -1014,6 +1019,54 @@ class SAICMGHolidayModeSwitch(CoordinatorEntity, SwitchEntity):
     async def async_turn_off(self, **kwargs):
         """Disable holiday mode."""
         await self.coordinator.async_set_holiday_mode(False)
+        self.async_write_ha_state()
+
+
+class SAICMGNegativeChargingValuesSwitch(CoordinatorEntity, SwitchEntity):
+    """Negative Charging Values (#442).
+
+    On: Charging Power and Charging Current show negative values exactly as
+    the car reports them, even while its Charging Status says charging. Off:
+    under a charging status, negative readings show as 0 (small negatives
+    around the start and end of a charge). V2X Discharging always shows them.
+
+    An MG4 discharging 15-18 A through a two-way DC charger reported
+    "Charging (DC)" the whole time, so both sensors read 0. Only present when
+    "Negative charging values switch" is ticked in the integration's options.
+    Only changes what the two sensors show; nothing is sent to the car.
+    """
+
+    _attr_entity_category = EntityCategory.CONFIG
+
+    def __init__(self, coordinator, entry, vin_info, vin):
+        super().__init__(coordinator)
+        self._vin = vin
+        self._attr_name = (
+            f"{vin_info.brandName} {vin_info.modelName} Negative Charging Values"
+        )
+        self._attr_unique_id = f"{entry.entry_id}_{vin}_negative_charging_values"
+        self._attr_icon = "mdi:battery-arrow-down"
+        self._device_info = create_device_info(coordinator, entry.entry_id)
+
+    @property
+    def device_info(self):
+        return self._device_info
+
+    @property
+    def is_on(self):
+        return bool(getattr(self.coordinator, "negative_charging_values", False))
+
+    @property
+    def available(self):
+        """A local setting: available whenever the entry is."""
+        return True
+
+    async def async_turn_on(self, **kwargs):
+        await self.coordinator.async_set_negative_charging_values(True)
+        self.async_write_ha_state()
+
+    async def async_turn_off(self, **kwargs):
+        await self.coordinator.async_set_negative_charging_values(False)
         self.async_write_ha_state()
 
 

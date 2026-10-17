@@ -91,6 +91,8 @@ from .const import (
     DEFAULT_AC_LONG_INTERVAL,
     CONF_HOLIDAY_UPDATE_INTERVAL,
     CONF_STALE_DATA_THRESHOLD,
+    CONF_NEGATIVE_CHARGING_SWITCH,
+    CONF_NEGATIVE_CHARGING_VALUES,
     CONF_BATTERY_CAPACITY_OVERRIDE,
     CONF_FUEL_TANK_OVERRIDE,
     parse_capacity_override,
@@ -645,6 +647,15 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         self.enable_shutdown_refresh_sequence = config_entry.options.get(
             "enable_shutdown_refresh_sequence", True
         )
+        # Negative Charging Values (#442): the option adds the switch, the
+        # switch shows negative Charging Power / Current even while the
+        # status says charging. Both off by default.
+        self.negative_charging_switch = bool(
+            config_entry.options.get(CONF_NEGATIVE_CHARGING_SWITCH, False)
+        )
+        self.negative_charging_values = bool(
+            config_entry.options.get(CONF_NEGATIVE_CHARGING_VALUES, False)
+        )
 
     # ── Account-level lock injection ─────────────────────────────────────────
 
@@ -970,6 +981,12 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         )
         self.enable_shutdown_refresh_sequence = options.get(
             "enable_shutdown_refresh_sequence", self.enable_shutdown_refresh_sequence
+        )
+        self.negative_charging_switch = bool(
+            options.get(CONF_NEGATIVE_CHARGING_SWITCH, False)
+        )
+        self.negative_charging_values = bool(
+            options.get(CONF_NEGATIVE_CHARGING_VALUES, False)
         )
         self.holiday_mode = options.get("holiday_mode", self.holiday_mode)
         self.holiday_update_interval = get_interval_hours(
@@ -3660,6 +3677,39 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             remaining if remaining is not None else "an unknown time",
             delay,
         )
+
+    @property
+    def allow_negative_charging_power(self) -> bool:
+        """Show negative Charging Power / Current under a charging status (#442).
+
+        Only while the Negative Charging Values switch exists (the option is
+        ticked) and is on.
+        """
+        return bool(
+            getattr(self, "negative_charging_switch", False)
+            and getattr(self, "negative_charging_values", False)
+        )
+
+    async def async_set_negative_charging_values(self, enabled: bool) -> None:
+        """Turn Negative Charging Values on/off and persist it (#442).
+
+        Kept in the options like Holiday Mode, so it survives a restart. Only
+        the sensors' display changes; nothing is sent to the car.
+        """
+        self.negative_charging_values = enabled
+        new_options = {
+            **self.config_entry.options,
+            CONF_NEGATIVE_CHARGING_VALUES: enabled,
+        }
+        self.hass.config_entries.async_update_entry(
+            self.config_entry, options=new_options
+        )
+        LOGGER.info(
+            "Negative Charging Values %s for VIN %s",
+            "on" if enabled else "off",
+            getattr(self, "vin", "?"),
+        )
+        self.async_update_listeners()
 
     async def async_set_holiday_mode(self, enabled: bool) -> None:
         """Turn holiday mode on/off and persist it.

@@ -54,9 +54,9 @@ Last Powered On, Last Powered Off and Last Vehicle Activity are saved by the int
 #### Charging Data *(BEV/PHEV)*
 - Charging Status *(Unplugged / Charging (AC) / Charging (DC) / V2X Discharging / …)*
 - Charging Voltage
-- Charging Current
+- Charging Current *(negative while the battery is giving power out; see [Negative charging power and current](#negative-charging-power-and-current))*
 - Charging Current Limit
-- Charging Power
+- Charging Power *(negative while the battery is giving power out, as above)*
 - Requested Charging Current *(from 1.3.0-beta12; **MGS6 only for now** — see [Sensors that depend on the model](#sensors-that-depend-on-the-model))*
 - Charger Input Voltage / Charger Input Current / Charger Input Power *(from 1.3.0-beta12; AC side of the on-board charger; **MGS6, and MG4 Electric from 1.4.0-beta15** — see [Sensors that depend on the model](#sensors-that-depend-on-the-model))*
 - Estimated Range After Charging *(the range expected when the current charge completes — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
@@ -324,6 +324,23 @@ The car's journey number is in the `journey_id` attribute. It goes up when a jou
 
 The sensor is created on any car that reports the field. If yours doesn't have it after updating, the car isn't sending it.
 
+### Negative charging power and current
+
+**Charging Power** and **Charging Current** go negative when the battery is giving power out rather than taking it in: V2L, or a two-way charger powering your home.
+
+While the car says it is **charging** (Charging Status *Charging*, *Charging (AC)*, *Charging (DC)*, *Charging Finished* and similar), negative readings are shown as **0**. Some cars report small negative values around the start and end of a charge, and showing those as a discharge would be wrong. With Charging Status **V2X Discharging**, negative values are always shown.
+
+Some cars report a charging status the whole time they are discharging. An MG4 discharging 15–18 A (about 4–6 kW) through a two-way DC charger reported **Charging (DC)** throughout, so both sensors read 0 while the battery fell 7–11% an hour (#442).
+
+If your car does this *(from 1.4.0-beta16)*:
+
+1. Under **Configure**, tick **Negative charging values switch**. This adds a **Negative Charging Values** switch to the device, among its configuration entities.
+2. Turn the switch **on**. Charging Power and Charging Current then show negative values exactly as the car reports them, however small, whatever the Charging Status says. **Off** shows negative readings as 0 while the status says charging, as before.
+
+Both are off by default. The switch takes effect straight away and is kept through a restart, and you can flip it from an automation, for example on while your two-way charger is discharging. Unticking the option removes the switch and goes back to showing 0.
+
+This only changes what the two sensors show. The charge records (**Last Charge Energy** and the rest) only ever count energy going in, so a discharge is never recorded as a charge either way.
+
 ### Sensors that depend on the model
 
 Some of what the car sends means different things on different models, or is on a different scale. Showing those readings everywhere would give wrong numbers on some cars, so each of these sensors only exists on models where the reading has been checked against the real car.
@@ -409,6 +426,7 @@ If your model reads wrong too, the same fix needs the same evidence: a monitor o
 - Sunroof *(if equipped — currently non-functional on tested models; see note below)*
 - Charging Port Lock *(⚠️ "on" means locked — see Entity States Reference)*
 - Holiday Mode *(slows polling to reduce wake-ups / 12V drain while the car is left for long periods — see [Deep sleep & holiday mode](power-management.md#deep-sleep--holiday-mode))*
+- Negative Charging Values *(only with **Negative charging values switch** ticked in the options — on means Charging Power and Charging Current show negative values even while the status says charging; see [Negative charging power and current](#negative-charging-power-and-current). From 1.4.0-beta16)*
 - Quiet Charging *(only with **Quiet charging** ticked in the options — on means scheduled polls read SAIC's stored status instead of waking the car; see [Quiet charging](power-management.md#quiet-charging). Was **Quiet Hours Live Polling**, the other way round, before 1.4.0-beta5)*
 > **Sunroof note:** the sunroof switch and status are retained but are currently non-functional on tested models (e.g. MGS6 EV), where the SAIC API always reports the sunroof as closed regardless of its real position and no working control command has been identified. The option is off by default. It may be revisited if MG adds sunroof support to the iSmart app.
 ### BUTTONS
@@ -486,6 +504,7 @@ This section lists every possible state for every status and control entity, so 
 | Heated Seat Rear Left / Rear Right | Rear seat heating | Rear seat off |
 | Sunroof | Sunroof open | Sunroof closed |
 | **Charging Port Lock** | **Charging port locked** | **Charging port unlocked** |
+| Negative Charging Values | Charging Power / Current show negative values as the car reports them | Negative values show as 0 while the Charging Status says charging |
  
 > Note that for **Charging Port Lock**, `on` = locked — the opposite convention to the `lock`-device-class binary sensor above. This is because it's a `switch` entity (where `on` simply reflects "the lock control is engaged"), not a `binary_sensor` with a `lock` device class.
  

@@ -51,6 +51,11 @@ from .trip_stats import (
 )
 
 
+def _negative_charging_allowed(coordinator):
+    """The owner wants negative Charging Power / Current shown as reported (#442)."""
+    return getattr(coordinator, "allow_negative_charging_power", False) is True
+
+
 def _stopped_per_status(coordinator):
     """No charging data, but the car's status says it isn't charging (#269).
 
@@ -2207,7 +2212,14 @@ class SAICMGChargingCurrentSensor(CoordinatorEntity, SensorEntity):
                     # measurement noise — clamp to 0 rather than show negative.
                     # V2X discharge (status 13) is intentionally excluded so
                     # genuine negative discharge current is preserved.
-                    if calculated_value < 0 and charging_status in {1, 2, 3, 9, 10, 12}:
+                    # Unless the owner has asked for negatives (#442): an MG4
+                    # discharging 15-18 A through a two-way DC charger reports
+                    # "Charging (DC)" (10) the whole time, not 13.
+                    if (
+                        calculated_value < 0
+                        and charging_status in {1, 2, 3, 9, 10, 12}
+                        and not _negative_charging_allowed(self.coordinator)
+                    ):
                         calculated_value = 0.0
 
                     self._last_valid_current = calculated_value
@@ -2353,7 +2365,12 @@ class SAICMGChargingPowerSensor(CoordinatorEntity, SensorEntity):
                     # bmsPackCrnt oscillates around 20000 and can produce small
                     # negative power values. Clamp to 0.
                     # V2X discharge (status 13) excluded — negative power is correct.
-                    if power < 0 and charging_status in {1, 2, 3, 9, 10, 12}:
+                    # Unless the owner has asked for negatives (#442).
+                    if (
+                        power < 0
+                        and charging_status in {1, 2, 3, 9, 10, 12}
+                        and not _negative_charging_allowed(self.coordinator)
+                    ):
                         power = 0.0
 
                     self._last_valid_power = power

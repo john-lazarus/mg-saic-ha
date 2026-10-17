@@ -17,6 +17,8 @@ from .const import (
     CONF_ABRP_USER_TOKEN,
     CONF_HOLIDAY_UPDATE_INTERVAL,
     CONF_STALE_DATA_THRESHOLD,
+    CONF_NEGATIVE_CHARGING_SWITCH,
+    CONF_NEGATIVE_CHARGING_VALUES,
     CONF_BATTERY_CAPACITY_OVERRIDE,
     CONF_FUEL_TANK_OVERRIDE,
     DEFAULT_HOLIDAY_UPDATE_INTERVAL_HOURS,
@@ -68,6 +70,7 @@ from saic_ismart_client_ng.model import SaicApiConfiguration
 # Options written by the device's controls rather than this form.
 RUNTIME_OPTION_KEYS = (
     "holiday_mode",
+    CONF_NEGATIVE_CHARGING_VALUES,
     CONF_QUIET_HOURS_START,
     CONF_QUIET_HOURS_END,
     CONF_QUIET_HOURS_LIVE_POLLING,
@@ -871,6 +874,12 @@ class SAICMGOptionsFlowHandler(config_entries.OptionsFlow):
                     default=self.options.get(
                         "enable_shutdown_refresh_sequence", True
                     ),
+                ): bool,
+                # Adds the Negative Charging Values switch (#442); the switch
+                # itself is a control on the device.
+                vol.Optional(
+                    CONF_NEGATIVE_CHARGING_SWITCH,
+                    default=self.options.get(CONF_NEGATIVE_CHARGING_SWITCH, False),
                 ): bool,
                 # Quiet hours (#269). The times and the Live Polling switch
                 # are controls on the device; this only adds or removes them.

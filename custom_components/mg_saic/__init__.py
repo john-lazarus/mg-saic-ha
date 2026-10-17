@@ -549,6 +549,8 @@ ENTITY_CAPABILITY_OPTIONS = (
     "has_window_control",
     # Adds or removes the Quiet Hours controls.
     "quiet_hours",
+    # Adds or removes the Negative Charging Values switch (#442).
+    "negative_charging_switch",
 )
 
 
