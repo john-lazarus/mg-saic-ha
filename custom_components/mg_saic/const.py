@@ -1288,6 +1288,13 @@ CONF_STALE_DATA_THRESHOLD = "stale_data_threshold_hours"
 # User-supplied usable battery capacity (kWh). Overrides both our per-model
 # profile value and the API-reported totalBatteryCapacity. Empty/0 = no override.
 CONF_BATTERY_CAPACITY_OVERRIDE = "battery_capacity_override_kwh"
+# Negative Charging Power / Current while the car reports a charging status
+# (#442). Some cars discharging through a two-way DC charger report
+# "Charging (DC)" (10) rather than "V2X Discharging" (13). The option adds the
+# Negative Charging Values switch; the switch's state is kept in the options
+# under CONF_NEGATIVE_CHARGING_VALUES.
+CONF_NEGATIVE_CHARGING_SWITCH = "negative_charging_switch"
+CONF_NEGATIVE_CHARGING_VALUES = "negative_charging_values"
 CONF_FUEL_TANK_OVERRIDE = "fuel_tank_override_litres"
 
 # remoteClimateStatus value meaning "the climate is running, under the
