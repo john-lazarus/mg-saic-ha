@@ -736,9 +736,10 @@ class SinceChargeCounterGuard:
 
     # -- persistence (stored alongside trip stats) --
 
-    def to_dict(self):
+    def to_dict(self, *, india=False):
         return {
-            **({"india_provenance": self.india_provenance} if hasattr(self, "india_provenance") else {}),
+            **({"india_provenance": self.india_provenance}
+               if india is True and hasattr(self, "india_provenance") else {}),
             "last": self.last,
             "offset_km": self.offset_km,
             "offset_kwh": self.offset_kwh,
@@ -750,10 +751,10 @@ class SinceChargeCounterGuard:
         }
 
     @classmethod
-    def from_dict(cls, data):
+    def from_dict(cls, data, *, india=False):
         guard = cls()
         if isinstance(data, dict):
-            if isinstance(data.get("india_provenance"), dict):
+            if india is True and isinstance(data.get("india_provenance"), dict):
                 guard.india_provenance = data["india_provenance"]
             guard.last = data.get("last")
             guard.offset_km = data.get("offset_km") or 0

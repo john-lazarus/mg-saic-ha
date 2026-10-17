@@ -47,6 +47,8 @@ from .logic import (
 )
 from .utils import create_device_info
 from .trip_stats import (
+    compact_india_origin,
+    compact_india_provenance,
     compute_driving_since_charge,
     compute_since_charge_efficiency,
     compute_soc_since_reset_efficiency,
@@ -59,6 +61,15 @@ def _stopped_per_status(coordinator):
     Checked with ``is True`` so a stand-in coordinator never counts.
     """
     return getattr(coordinator, "charging_stopped_per_status", False) is True
+
+
+def _india_state_attributes(sensor):
+    """Project the retained value's origin without exposing recursive history."""
+    origin = getattr(sensor, "_india_origin", None)
+    return {
+        "measurement_time": getattr(sensor, "_india_measurement_time", None),
+        "india_provenance": compact_india_origin(origin) if origin is not None else None,
+    }
 
 
 def _india_charging_origin(sensor):
@@ -77,7 +88,8 @@ def _india_charging_origin(sensor):
                   for name in (("bmsPackVol", "bmsPackCrnt", "bmsChrgSts") if field == "power"
                                else ("bmsPackCrnt", "bmsChrgSts"))}
         return {"source": "derived", "measurement_time": origin.get("measurement_time"),
-                "operation": "current = 1000 - raw_current * current_factor; power = current * raw_voltage * voltage_factor / 1000; inactive-state zero and noise clamping",
+                "operation": "current=1000-raw_current*current_factor; power=current*raw_voltage*voltage_factor/1000",
+                "method": "inactive-state zero and noise clamping",
                 "current_factor": getattr(sensor, "_factor", CHARGING_CURRENT_FACTOR),
                 "voltage_factor": CHARGING_VOLTAGE_FACTOR, "inputs": inputs}
     return {**origin, "factor": getattr(sensor, "_factor", None),
@@ -1042,13 +1054,9 @@ class SAICMGMileageSensor(CoordinatorEntity, SensorEntity):
 
     @property
     def extra_state_attributes(self):
-        status = self.coordinator.data.get("status")
-        basic = getattr(status, "basicVehicleStatus", None)
-        if not (india_measurements(basic, self.coordinator.data.get("charging"))
-                or is_india_backend(getattr(self.coordinator, "client", None))):
+        if not is_india_backend(getattr(self.coordinator, "client", None)):
             return super().extra_state_attributes
-        return {"measurement_time": getattr(self, "_india_measurement_time", None),
-                "india_provenance": getattr(self, "_india_origin", None)}
+        return _india_state_attributes(self)
 
 
 class SAICMGVehicleSensor(CoordinatorEntity, SensorEntity):
@@ -1894,13 +1902,9 @@ class SAICMGElectricRangeSensor(CoordinatorEntity, SensorEntity):
 
     @property
     def extra_state_attributes(self):
-        status = self.coordinator.data.get("status")
-        basic = getattr(status, "basicVehicleStatus", None)
-        if not (india_measurements(basic, self.coordinator.data.get("charging"))
-                or is_india_backend(getattr(self.coordinator, "client", None))):
+        if not is_india_backend(getattr(self.coordinator, "client", None)):
             return super().extra_state_attributes
-        return {"measurement_time": getattr(self, "_india_measurement_time", None),
-                "india_provenance": getattr(self, "_india_origin", None)}
+        return _india_state_attributes(self)
 
 
 class SAICMGInstantPowerSensor(CoordinatorEntity, SensorEntity):
@@ -2171,13 +2175,9 @@ class SAICMGSOCSensor(CoordinatorEntity, SensorEntity):
 
     @property
     def extra_state_attributes(self):
-        status = self.coordinator.data.get("status")
-        basic = getattr(status, "basicVehicleStatus", None)
-        if not (india_measurements(basic, self.coordinator.data.get("charging"))
-                or is_india_backend(getattr(self.coordinator, "client", None))):
+        if not is_india_backend(getattr(self.coordinator, "client", None)):
             return super().extra_state_attributes
-        return {"measurement_time": getattr(self, "_india_measurement_time", None),
-                "india_provenance": getattr(self, "_india_origin", None)}
+        return _india_state_attributes(self)
 
 
 # CHARGING SENSORS
@@ -2349,8 +2349,7 @@ class SAICMGChargingCurrentSensor(CoordinatorEntity, SensorEntity):
     @property
     def extra_state_attributes(self):
         if is_india_backend(getattr(self.coordinator, "client", None)):
-            return {"measurement_time": getattr(self, "_india_measurement_time", None),
-                    "india_provenance": getattr(self, "_india_origin", None)}
+            return _india_state_attributes(self)
         return super().extra_state_attributes
 
 
@@ -2510,8 +2509,7 @@ class SAICMGChargingPowerSensor(CoordinatorEntity, SensorEntity):
     @property
     def extra_state_attributes(self):
         if is_india_backend(getattr(self.coordinator, "client", None)):
-            return {"measurement_time": getattr(self, "_india_measurement_time", None),
-                    "india_provenance": getattr(self, "_india_origin", None)}
+            return _india_state_attributes(self)
         return super().extra_state_attributes
 
 
@@ -2681,10 +2679,9 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
         """
         if is_india_backend(getattr(self.coordinator, "client", None)):
             _ = self.native_value
-            attrs = {"measurement_time": getattr(self, "_india_measurement_time", None),
-                     "india_provenance": getattr(self, "_india_origin", None)}
+            attrs = _india_state_attributes(self)
             if self._field == "totalBatteryCapacity":
-                attrs["capacity_source"] = (getattr(self, "_india_origin", None) or {}).get("resolution")
+                attrs["capacity_source"] = (attrs["india_provenance"] or {}).get("resolution")
             elif self._field == "imcuChrgngEstdElecRng":
                 attrs["source"] = self._last_source
             return attrs
@@ -3953,13 +3950,13 @@ class SAICMGEfficiencySinceChargeSensor(CoordinatorEntity, SensorEntity):
         result = self._compute()
         if result is not None and is_india_backend(getattr(self.coordinator, "client", None)):
             rcs = getattr(self.coordinator.data.get("charging"), "rvsChargeStatus", None)
-            result["india_provenance"] = {
+            result["india_provenance"] = compact_india_provenance({
                 "distance": {**india_field_provenance(rcs, "mileageSinceLastCharge"), "factor": DATA_DECIMAL_CORRECTION},
                 "energy": {**india_field_provenance(rcs, "powerUsageSinceLastCharge"),
                            "factor": DATA_DECIMAL_CORRECTION,
                            "energy_correction": getattr(self.coordinator, "charging_capacity_correction", None)},
                 "calculation": "distance / corrected energy",
-            }
+            }, kind="sensor")
         return result
 
 
@@ -4000,12 +3997,15 @@ class _DrivingSinceChargeBase(CoordinatorEntity, SensorEntity):
         result = self._compute()
         if result is not None and is_india_backend(getattr(self.coordinator, "client", None)):
             rcs = getattr((self.coordinator.data or {}).get("charging"), "rvsChargeStatus", None)
-            result.setdefault("india_provenance", {}).update({
+            result["india_provenance"] = compact_india_provenance({
+                **(result.get("india_provenance") or {}),
                 "distance_since_charge": {**india_field_provenance(rcs, "mileageSinceLastCharge"), "factor": DATA_DECIMAL_CORRECTION},
                 "energy_since_charge": {**india_field_provenance(rcs, "powerUsageSinceLastCharge"),
                                         "factor": DATA_DECIMAL_CORRECTION,
                                         "energy_correction": getattr(self.coordinator, "charging_capacity_correction", None)},
-            })
+            }, kind="driving")
+        elif result is not None:
+            result.pop("india_provenance", None)
         return result
 
 
@@ -4176,9 +4176,10 @@ class SAICMGBatteryEnergySensor(CoordinatorEntity, SensorEntity):
         status = (self.coordinator.data or {}).get("status")
         basic = getattr(status, "basicVehicleStatus", None)
         charging = (self.coordinator.data or {}).get("charging")
-        if india_measurements(basic, charging):
+        if (is_india_backend(getattr(self.coordinator, "client", None))
+                and india_measurements(basic, charging)):
             rcs = getattr(charging, "rvsChargeStatus", None)
-            attrs["india_provenance"] = (
+            attrs["india_provenance"] = compact_india_origin(
                 {"source": "derived", "operation": "soc / 100 * capacity",
                  "inputs": {"soc_pct": india_measurement(basic, charging, "soc", provenance=True)[1],
                             "capacity_kwh": self.coordinator._india_capacity_provenance(charging)}}
@@ -4526,9 +4527,14 @@ class SAICMGChargeSessionDurationSensor(CoordinatorEntity, SensorEntity):
             "paused_s": int(session.get("paused_s") or 0),
             "interruptions": int(session.get("interruptions") or 0),
         }
-        for key in ("duration_source", "charge_start_ts", "charge_end_ts", "as_of", "india_provenance"):
+        for key in ("duration_source", "charge_start_ts", "charge_end_ts", "as_of"):
             if session.get(key) is not None:
                 attrs[key] = session[key]
+        if (is_india_backend(getattr(self.coordinator, "client", None))
+                and session.get("india_provenance") is not None):
+            attrs["india_provenance"] = compact_india_provenance(
+                session["india_provenance"], kind="charge"
+            )
         return attrs
 
 
@@ -4842,12 +4848,12 @@ class SAICMGEfficiencySinceResetSensor(CoordinatorEntity, SensorEntity):
             basic = getattr(self.coordinator.data.get("status"), "basicVehicleStatus", None)
             charging = self.coordinator.data.get("charging")
             baseline = self.coordinator.trip_stats.soc_reset_baseline
-            result["india_provenance"] = {
+            result["india_provenance"] = compact_india_provenance({
                 "baseline": baseline.get("india_provenance") if baseline else None,
                 "soc_pct": india_measurement(basic, charging, "soc", provenance=True)[1],
                 "odometer_km": india_measurement(basic, charging, "odometer", provenance=True)[1],
                 "capacity_kwh": self.coordinator._india_capacity_provenance(charging),
                 "calculation": "(current odometer - baseline odometer) / ((baseline SOC - current SOC) / 100 * capacity)",
-            }
+            }, kind="sensor")
         return result
 

@@ -17,6 +17,7 @@ from mg_ismart_india_client import (
 
 from ..const import (
     CHARGING_CURRENT_FACTOR, CHARGING_VOLTAGE_FACTOR,
+    STATUS_TIMESTAMP_FUTURE_TOLERANCE, STATUS_TIMESTAMP_MAX_AGE,
 )
 from ..logic import derive_battery_capacity_kwh
 from . import INDIA_FEATURES
@@ -92,8 +93,6 @@ _BMS_CHRG_STS_PLUGGED_IN = 7  # connected but not charging: paused or full
 
 def _measurement_time(value):
     """Keep the source clock separate from receipt time, using HA's tolerances."""
-    from ..const import STATUS_TIMESTAMP_FUTURE_TOLERANCE, STATUS_TIMESTAMP_MAX_AGE
-
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not isfinite(value):
         return None
     now = datetime.now(timezone.utc).timestamp()

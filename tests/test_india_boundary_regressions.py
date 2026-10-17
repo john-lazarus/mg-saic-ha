@@ -20,6 +20,17 @@ TRIP = sys.modules['mg_saic.trip_stats']
 ERRORS = sys.modules['mg_saic.errors']
 
 
+def _load_india_manager(saved):
+    """Reload through real storage handling with the India backend selected."""
+    manager = TRIP.TripStatsManager(object(), 'entry', 'VIN', india=True)
+    store = NS(async_load=AsyncMock(return_value=saved))
+    with patch.dict(sys.modules, {
+        'homeassistant.helpers.storage': NS(Store=lambda *_a, **_k: store),
+    }):
+        asyncio.run(manager.async_load())
+    return manager
+
+
 class _Http:
     """Echo a valid PIN frame, then lose the control reply at the HTTP boundary."""
     def __init__(self):
@@ -175,7 +186,7 @@ class TelemetryBoundaryTests(unittest.TestCase):
                 self.assertFalse(hasattr(TRIP.charge_end_from_stopped(global_stop, global_current), 'india_provenance'))
 
     def test_charge_close_uses_current_capacity_argument_with_stopped_fields(self):
-        manager = TRIP.TripStatsManager(None, 'entry', 'VIN')
+        manager = TRIP.TripStatsManager(None, 'entry', 'VIN', india=True)
         start = self._snap(1, 50, 1000, 'start')
         stopped = self._snap(4, 80, 1000, 'stopped')
         current = self._snap(12, 70, 1020, 'current')
@@ -228,7 +239,7 @@ class TelemetryBoundaryTests(unittest.TestCase):
                          (0, {'source':'ordinary','field':'extendedData1','measurement_time':status_stamp,'factor':1.0}))
         c = COORD.__new__(COORD)
         c.client = NS(_india_backend=True)
-        c.trip_stats = TRIP.TripStatsManager(None, 'entry', 'VIN')
+        c.trip_stats = TRIP.TripStatsManager(None, 'entry', 'VIN', india=True)
         c.vin = 'VIN'
         c._india_state_status_time, c._india_state_charge_time = status_stamp, charge_stamp
         c.last_charging_data = object()
@@ -247,16 +258,19 @@ class TelemetryBoundaryTests(unittest.TestCase):
         origin = rcs.india_provenance['lastChargeEndingPower']
         self.assertTrue(origin['held'])
         self.assertEqual(origin['measurement_time'], charge_stamp)
-        restored = LOGIC.SinceChargeCounterGuard.from_dict(c.counter_reset_guard.to_dict())
+        restored = LOGIC.SinceChargeCounterGuard.from_dict(
+            c.counter_reset_guard.to_dict(india=True), india=True
+        )
         self.assertEqual(restored.india_provenance, c.counter_reset_guard.india_provenance)
 
     def test_wobble_keeps_processed_counter_origins_through_reset_and_restart(self):
-        from test_charge_reload import _loaded, _saved
+        from test_charge_reload import _saved
         from test_counter_reset_guard import BEFORE, PHANTOM, _payload, _r
         c = COORD.__new__(COORD)
+        c.client = NS(_india_backend=True)
         c.vin = 'VIN'
         c.counter_reset_guard = LOGIC.SinceChargeCounterGuard()
-        c.trip_stats = TRIP.TripStatsManager(None, 'entry', 'VIN')
+        c.trip_stats = TRIP.TripStatsManager(None, 'entry', 'VIN', india=True)
         c._schedule_trip_save = MagicMock()  # HA storage scheduling boundary
 
         def apply(stamp, reading):
@@ -278,16 +292,25 @@ class TelemetryBoundaryTests(unittest.TestCase):
                 self.assertEqual(c.counter_reset_guard.india_provenance['last'][key], rcs.india_provenance[field])
                 self.assertEqual(c.counter_reset_guard.india_provenance['raw'][key]['measurement_time'], stamp)
             self.assertEqual((c.counter_reset_guard.offset_km, c.counter_reset_guard.offset_kwh), (0, 0))
-        restored = _loaded(_saved(c.trip_stats))
-        c.counter_reset_guard = LOGIC.SinceChargeCounterGuard.from_dict(restored.counter_reset_guard)
+        restored = _load_india_manager(_saved(c.trip_stats))
+        c.counter_reset_guard = LOGIC.SinceChargeCounterGuard.from_dict(
+            restored.counter_reset_guard, india=True
+        )
         rcs = apply(400, PHANTOM)
         self.assertEqual((rcs.mileageSinceLastCharge, rcs.powerUsageSinceLastCharge, rcs.lastChargeEndingPower), (6100, 266, 724))
-        for field in ('mileageSinceLastCharge', 'powerUsageSinceLastCharge'):
+        for field, key in (('mileageSinceLastCharge', 'km'), ('powerUsageSinceLastCharge', 'kwh')):
             origin = rcs.india_provenance[field]
             self.assertEqual(origin['inputs']['raw']['measurement_time'], 400)
-            self.assertEqual(origin['inputs']['offset']['inputs']['previous_raw']['measurement_time'], 100)
+            self.assertEqual(origin['inputs']['offset']['value'], getattr(c.counter_reset_guard, 'offset_' + key))
+            # The guard keeps the latest offset's input; sensor metadata only
+            # needs the offset summary, without nesting its whole ancestry.
+            offset = c.counter_reset_guard.india_provenance['offset_' + key]
+            self.assertEqual(offset['inputs']['previous_raw']['measurement_time'], 100)
+            self.assertNotIn('inputs', origin['inputs']['offset'])
         self.assertEqual(rcs.india_provenance['lastChargeEndingPower']['measurement_time'], 300)
-        c.counter_reset_guard = LOGIC.SinceChargeCounterGuard.from_dict(_loaded(_saved(c.trip_stats)).counter_reset_guard)
+        c.counter_reset_guard = LOGIC.SinceChargeCounterGuard.from_dict(
+            _load_india_manager(_saved(c.trip_stats)).counter_reset_guard, india=True
+        )
         rcs = apply(500, _r(PHANTOM, km=10, kwh=2))
         self.assertEqual((rcs.mileageSinceLastCharge, rcs.powerUsageSinceLastCharge), (6110, 268))
         rcs = apply(600, _r(PHANTOM, km=9, kwh=1))

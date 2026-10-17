@@ -122,8 +122,6 @@ class AbrpApi:
         Returns (sent, message). Never raises — a failure here must not break
         the coordinator's update cycle.
         """
-        if getattr(vehicle_status, "india", False) is True or getattr(charge_info, "india", False) is True:
-            return await self.async_send_india(vehicle_status, charge_info, {})
         try:
             tlm = self._build_payload(vehicle_status, charge_info)
         except Exception as err:  # noqa: BLE001 - defensive

@@ -39,7 +39,10 @@ from .logic import (
     status_charging_flag,
     status_says_not_charging,
 )
-from .trip_stats import TripStatsManager, TripSnapshot, ChargeSnapshot
+from .trip_stats import (
+    TripStatsManager, TripSnapshot, ChargeSnapshot,
+    compact_india_origin, compact_india_provenance,
+)
 from .cached_status import summarise_cached_status
 from .saved_data import decode_vehicle_data, encode_vehicle_data
 from .quiet_hours import (
@@ -1157,15 +1160,16 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # Trip/efficiency statistics (#301). Load the persisted open/last trip
         # so a drive in progress survives a restart and the sensors repopulate.
         try:
+            india = is_india_backend(getattr(self, "client", None))
             self.trip_stats = TripStatsManager(
-                self.hass, self.config_entry.entry_id, self.vin
+                self.hass, self.config_entry.entry_id, self.vin, india=india
             )
             await self.trip_stats.async_load()
             self.counter_reset_guard = SinceChargeCounterGuard.from_dict(
-                self.trip_stats.counter_reset_guard
+                self.trip_stats.counter_reset_guard, india=india
             )
             if self.counter_reset_guard.repair_one_sided_hold():
-                if hasattr(self.counter_reset_guard, "india_provenance"):
+                if india and hasattr(self.counter_reset_guard, "india_provenance"):
                     for key in ("offset_km", "offset_kwh"):
                         if not getattr(self.counter_reset_guard, key):
                             self.counter_reset_guard.india_provenance[key] = {"source": "constant", "value": 0}
@@ -1175,7 +1179,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                     "Since Last Charge show the car's own figures again (#436)",
                     self.vin,
                 )
-                self.trip_stats.counter_reset_guard = self.counter_reset_guard.to_dict()
+                self.trip_stats.counter_reset_guard = self.counter_reset_guard.to_dict(india=india)
                 self._schedule_trip_save()
         except Exception as e:  # noqa: BLE001 - stats must never block setup
             LOGGER.warning("Trip stats unavailable for VIN %s: %s", self.vin, e)
@@ -1650,7 +1654,8 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                                 for field in ("mileageSinceLastCharge", "powerUsageSinceLastCharge", "lastChargeEndingPower"):
                                     setattr(rcs, field, getattr(previous_rcs, field, None))
                                     rcs.india_provenance[field] = {
-                                        **india_field_provenance(previous_rcs, field), "held": True,
+                                        **compact_india_origin(india_field_provenance(previous_rcs, field)),
+                                        "held": True,
                                     }
                     else:
                         self.charging_freshness.record_success(now)
@@ -1830,6 +1835,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
     def _india_snapshot_measurement(self, basic, charging, field):
         """Keep each snapshot value paired with its origin across source regressions."""
         value, origin = india_measurement(basic, charging, field, provenance=True)
+        origin = compact_india_origin(origin)
         if not hasattr(self, "_india_snapshot_readings"):
             self._india_snapshot_readings = {}
         readings = self._india_snapshot_readings
@@ -1893,7 +1899,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             since_charge_kwh=kwh,
         )
         if provenance is not None:
-            snapshot.india_provenance = provenance
+            snapshot.india_provenance = compact_india_provenance(provenance, kind="snapshot")
         return snapshot
 
     @staticmethod
@@ -2306,7 +2312,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             ),
         )
         if provenance is not None:
-            snapshot.india_provenance = provenance
+            snapshot.india_provenance = compact_india_provenance(provenance, kind="snapshot")
         return snapshot
 
     @staticmethod
@@ -4115,15 +4121,18 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             }
             guard = self.counter_reset_guard
             was_odometer = guard.odometer_in_km
-            india = getattr(charging, "india", False) is True
+            india = (is_india_backend(getattr(self, "client", None))
+                     and getattr(charging, "india", False) is True)
             if india:
-                origins = getattr(guard, "india_provenance", {})
+                origins = compact_india_provenance(
+                    getattr(guard, "india_provenance", None), kind="guard"
+                ) or {}
                 offsets_before = {"km": guard.offset_km, "kwh": guard.offset_kwh}
                 held_before = guard.held_ending
             adjusted, event, persist = guard.process(now.isoformat(), reading)
             if india:
                 raw_origins = {
-                    key: india_field_provenance(rcs, field)
+                    key: compact_india_origin(india_field_provenance(rcs, field))
                     for field, key in (("mileageSinceLastCharge", "km"),
                                        ("powerUsageSinceLastCharge", "kwh"),
                                        ("lastChargeEndingPower", "ending"), ("mileage", "odo"))
@@ -4144,9 +4153,15 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                     if offset != offsets_before[key]:
                         offset_origin = {
                             "source": "derived", "operation": "counter reset offset",
-                            "inputs": {"previous_offset": offset_origin,
-                                       "previous_raw": previous_last.get(key, unknown)},
+                            "value": offset,
+                            "updated_at": now.timestamp(),
+                            "reset_count": guard.ignored_count,
+                            "inputs": {"previous_raw": previous_last.get(key, unknown)},
                         }
+                    # The numeric guard already preserves the accumulated
+                    # offset. Its provenance needs only the latest origin,
+                    # not an ancestry tree containing every earlier reset.
+                    offset_origin = compact_india_origin({**offset_origin, "value": offset})
                     state["offset_" + key] = offset_origin
                     selected[key] = {
                         "source": "derived", "operation": "raw counter + reset offset",
@@ -4175,12 +4190,14 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                     }
                     state["last"]["km"] = selected["km"]
                 rcs.india_provenance = {
-                    field: selected[key] for field, key in (
+                    field: compact_india_origin(selected[key]) for field, key in (
                         ("mileageSinceLastCharge", "km"), ("powerUsageSinceLastCharge", "kwh"),
                         ("lastChargeEndingPower", "ending"))
                 }
-                guard.india_provenance = state
-                persist = True  # original input clocks must survive guard restoration
+                guard.india_provenance = compact_india_provenance(state, kind="guard")
+                # Original input clocks must survive guard restoration, but
+                # unchanged metadata alone does not require another save.
+                persist = persist or guard.india_provenance != origins
 
             if adjusted.get("km_from_odometer") and not was_odometer:
                 LOGGER.warning(
@@ -4237,7 +4254,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
 
             trip_stats = getattr(self, "trip_stats", None)
             if persist and trip_stats is not None:
-                trip_stats.counter_reset_guard = guard.to_dict()
+                trip_stats.counter_reset_guard = guard.to_dict(india=india)
                 self._schedule_trip_save()
         except Exception as err:  # noqa: BLE001 - must never cost a poll
             LOGGER.debug(

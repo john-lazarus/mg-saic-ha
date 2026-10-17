@@ -39,7 +39,295 @@ from __future__ import annotations
 
 from dataclasses import dataclass, asdict, replace
 from datetime import datetime, timezone
+import json
+from math import isfinite
 from typing import Any
+
+
+INDIA_PROVENANCE_VERSION = 1
+INDIA_PROVENANCE_MAX_BYTES = 6144
+_INDIA_ORIGIN_TEXT = ("source", "field", "operation", "method", "resolution", "substitution")
+_INDIA_ORIGIN_NUMBERS = (
+    "value", "factor", "energy_correction", "current_factor", "voltage_factor",
+    "updated_at", "reset_count", "offset_value", "offset_updated_at",
+)
+_INDIA_INPUTS = (
+    "raw", "offset", "previous_raw", "odometer", "distance", "baseline", "soc", "range",
+    "soc_pct", "pack_energy_kwh", "capacity_kwh", "bmsPackVol", "bmsPackCrnt",
+    "bmsChrgSts", "battery_energy_kwh", "power_usage_since_last_charge_kwh",
+)
+_INDIA_SNAPSHOT_FIELDS = (
+    "ts", "odometer_km", "soc_pct", "fuel_pct", "since_charge_km",
+    "since_charge_kwh", "capacity_kwh", "tank_litres", "range_km",
+    "pack_energy_kwh", "record_start", "record_end", "chargingDuration",
+    "power_kw", "soc_low_pct",
+)
+_INDIA_TRIP_FIELDS = (
+    "ts", "odometer_km", "soc_pct", "fuel_pct", "since_charge_km",
+    "since_charge_kwh", "capacity_kwh", "tank_litres",
+)
+_INDIA_CHARGE_FIELDS = (
+    "ts", "soc_pct", "odometer_km", "range_km", "pack_energy_kwh",
+    "record_start", "record_end", "chargingDuration", "power_kw", "capacity_kwh",
+)
+
+
+def _india_text(value, limit=96):
+    if not isinstance(value, str) or len(value) > limit:
+        return None
+    try:
+        # Bound the serialized representation too (including escaped controls).
+        return value if len(json.dumps(value, ensure_ascii=False).encode("utf-8")) - 2 <= limit else None
+    except UnicodeEncodeError:
+        return None
+
+
+def _india_number(value):
+    # Booleans, non-finite values and arbitrary-size integers are not telemetry.
+    if type(value) is int:
+        return value if value.bit_length() <= 64 else None
+    if type(value) is float and isfinite(value):
+        return value
+    return None
+
+
+def _india_time(value):
+    if _india_number(value) is not None:
+        return value
+    text = _india_text(value, 40)
+    if text is not None:
+        try:
+            datetime.fromisoformat(text)
+            return text
+        except ValueError:
+            pass
+    return None
+
+
+def _india_origin_leaf(origin):
+    """Copy only bounded scalars; never copy a caller's nested containers."""
+    if not isinstance(origin, dict):
+        return {"source": "unknown", "measurement_time": None}
+    result = {}
+    for key in _INDIA_ORIGIN_TEXT:
+        value = _india_text(origin.get(key), 48 if key in ("source", "field") else 96)
+        if value is not None:
+            result[key] = value
+    for key in _INDIA_ORIGIN_NUMBERS:
+        value = _india_number(origin.get(key))
+        if value is None and key in ("updated_at", "offset_updated_at"):
+            value = _india_time(origin.get(key))
+        if value is None and key == "value":
+            value = _india_text(origin.get(key), 64)
+        if value is not None:
+            result[key] = value
+    if "measurement_time" in origin:
+        # Source-selection compares these clocks numerically. ISO labels remain
+        # valid in ts.value/updated_at, but cannot become a retained source clock.
+        result["measurement_time"] = _india_number(origin["measurement_time"])
+    if type(origin.get("held")) is bool:
+        result["held"] = origin["held"]
+    result.setdefault("source", "unknown")
+    return result
+
+
+def compact_india_origin(origin):
+    """Keep the selected value's origin, with at most four direct input leaves.
+
+    Old reset metadata can contain arbitrarily deep ancestry. This function
+    never walks that history. A short selected-raw/filtered chain can recover
+    an original clock without substituting the time at which it was restored.
+    """
+    result = _india_origin_leaf(origin)
+    if not isinstance(origin, dict):
+        return result
+    selected = origin
+    seen = set()
+    for _ in range(8):
+        if not isinstance(selected, dict) or id(selected) in seen:
+            break
+        seen.add(id(selected))
+        stamp = _india_number(selected.get("measurement_time"))
+        if stamp is not None:
+            if result.get("measurement_time") is None:
+                result["measurement_time"] = stamp
+            break
+        inputs = selected.get("inputs")
+        selected = inputs.get("raw") if isinstance(inputs, dict) else selected.get("input")
+    inputs = origin.get("inputs")
+    if isinstance(inputs, dict):
+        leaves = {}
+        for key in _INDIA_INPUTS:
+            if isinstance(inputs.get(key), dict):
+                leaf = _india_origin_leaf(inputs[key])
+                # An input identifies an observation, not another calculation.
+                for description in ("operation", "method", "substitution"):
+                    leaf.pop(description, None)
+                leaves[key] = leaf
+                if len(leaves) == 4:
+                    break
+        if leaves:
+            result["inputs"] = leaves
+    target = origin.get("target_soc")
+    if isinstance(target, dict):
+        result["target_soc"] = _india_origin_leaf(target)
+    return result
+
+
+def _bounded_india_provenance(result):
+    """Put a final byte ceiling on optional descriptions, never numeric state."""
+    def size():
+        return len(json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+
+    if size() <= INDIA_PROVENANCE_MAX_BYTES:
+        return result
+    # Only our freshly built, finite, shallow structure is visited here.
+    pending = [result]
+    while pending:
+        item = pending.pop()
+        if not isinstance(item, dict):
+            continue
+        if "source" in item:
+            for key in ("inputs", "operation", "method", "target_soc"):
+                item.pop(key, None)
+        pending.extend(value for value in item.values() if isinstance(value, dict))
+    result["summary_only"] = True
+    if size() <= INDIA_PROVENANCE_MAX_BYTES:
+        return result
+    # The fixed schemas below fit within the ceiling using these minimal
+    # origins. Keep every selected field's source, clock and held flag.
+    pending = [result]
+    while pending:
+        item = pending.pop()
+        if "source" in item:
+            for key in tuple(item):
+                if key not in ("source", "field", "measurement_time", "held"):
+                    item.pop(key)
+        for key in ("calculations", "power_record", "calculation"):
+            item.pop(key, None)
+        pending.extend(value for value in item.values() if isinstance(value, dict))
+    return result
+
+
+def compact_india_provenance(value, *, kind="snapshot"):
+    """Project optional India metadata onto a versioned, bounded schema.
+
+    Missing/unknown versions have no effect on numeric trip or guard state.
+    Unversioned PR data is accepted as legacy input. Histories are never
+    copied: only the latest trip and current guard inputs may be retained.
+    """
+    if not isinstance(value, dict):
+        return None
+    version = value.get("schema_version")
+    if version is not None and (type(version) is not int or version != INDIA_PROVENANCE_VERSION):
+        return None
+    result = {"schema_version": INDIA_PROVENANCE_VERSION}
+
+    def origin(key):
+        if isinstance(value.get(key), dict):
+            result[key] = compact_india_origin(value[key])
+
+    def group(key, child_kind, fields=None):
+        raw = value.get(key)
+        if isinstance(raw, dict) and fields is not None:
+            raw = {name: raw[name] for name in ("schema_version", "summary_only", *fields) if name in raw}
+        item = compact_india_provenance(raw, kind=child_kind)
+        if item is not None:
+            result[key] = item
+
+    if kind == "snapshot":
+        for key in _INDIA_SNAPSHOT_FIELDS:
+            origin(key)
+    elif kind in ("trip", "charge"):
+        for key in ("start", "end"):
+            group(key, "snapshot", _INDIA_TRIP_FIELDS if kind == "trip" else _INDIA_CHARGE_FIELDS)
+        if kind == "trip":
+            group("baseline", "snapshot", ("since_charge_km", "since_charge_kwh"))
+        capacity = value.get("capacity_kwh")
+        if isinstance(capacity, dict):
+            if isinstance(capacity.get("origin"), dict):
+                result["capacity_kwh"] = {
+                    "value": _india_number(capacity.get("value")),
+                    "origin": compact_india_origin(capacity["origin"]),
+                }
+            else:
+                origin("capacity_kwh")
+        calculations = value.get("calculations")
+        if isinstance(calculations, dict):
+            methods = {}
+            for key in ("distance_km", "energy_kWh"):
+                item = calculations.get(key)
+                if not isinstance(item, dict):
+                    continue
+                method = _india_text(item.get("operation"), 48)
+                inputs = item.get("inputs")
+                if method is not None:
+                    methods[key] = {"operation": method}
+                    if isinstance(inputs, (list, tuple)):
+                        methods[key]["inputs"] = [
+                            name for name in inputs[:3] if _india_text(name, 48) is not None
+                        ]
+            if kind == "charge":
+                for key in ("energy_soc", "energy_counter", "range_added", "average_power", "energy_measured"):
+                    description = _india_text(calculations.get(key))
+                    if description is not None:
+                        methods[key] = description
+                    elif key == "energy_measured" and isinstance(calculations.get(key), str):
+                        methods[key] = "power_integration_with_boundary_estimates"
+            if methods:
+                result["calculations"] = methods
+        power = value.get("power_record")
+        if isinstance(power, dict):
+            result["power_record"] = {
+                key: number for key in ("kwh", "first_ts", "first_kw", "last_ts", "last_kw",
+                                        "samples", "max_gap_s", "held_zero_ts", "ignored_zero_samples")
+                if (number := _india_number(power.get(key))) is not None
+            }
+    elif kind == "tally":
+        latest = value.get("latest_trip")
+        history = value.get("trips")
+        if latest is None and isinstance(history, list) and history:
+            latest = history[-1]
+        latest = compact_india_provenance(latest, kind="trip")
+        if latest is not None:
+            result["latest_trip"] = latest
+        origin("since_charge_km")
+    elif kind == "driving":
+        group("tally", "tally")
+        for key in ("parked_reference", "distance_since_charge", "energy_since_charge"):
+            origin(key)
+    elif kind == "guard":
+        for key in ("last", "raw"):
+            items = value.get(key)
+            if isinstance(items, dict):
+                result[key] = {field: compact_india_origin(items[field])
+                               for field in ("km", "kwh", "ending", "odo")
+                               if isinstance(items.get(field), dict)}
+        for key in ("offset_km", "offset_kwh", "held_ending", "baseline_odo"):
+            origin(key)
+    elif kind == "sensor":
+        group("baseline", "snapshot", ("ts", "soc_pct", "odometer_km", "soc_low_pct"))
+        for key in ("distance", "energy", "soc_pct", "odometer_km", "capacity_kwh"):
+            origin(key)
+    else:
+        raise ValueError(f"Unknown India provenance kind: {kind}")
+    calculation = _india_text(value.get("calculation"))
+    if calculation is not None:
+        result["calculation"] = calculation
+    if value.get("summary_only") is True:
+        result["summary_only"] = True
+    return _bounded_india_provenance(result) if len(result) > 1 else None
+
+
+def _compact_india_record(record, kind, *, india=True):
+    if not isinstance(record, dict) or "india_provenance" not in record:
+        return record
+    selected = dict(record)
+    raw = selected.pop("india_provenance")
+    metadata = compact_india_provenance(raw, kind=kind) if india is True else None
+    if metadata is not None:
+        selected["india_provenance"] = metadata
+    return selected
 
 # Minimum SOC rise (%) above the lowest point seen since the baseline was set
 # for the car to be considered charging. Above the post-drive pack rebound
@@ -145,15 +433,16 @@ class TripSnapshot:
     since_charge_km: float | None = None
     since_charge_kwh: float | None = None
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self, *, india=False) -> dict[str, Any]:
         # Optional India metadata stays outside the global dataclass/constructor.
         data = asdict(self)
-        if getattr(self, "india_provenance", None) is not None:
-            data["india_provenance"] = self.india_provenance
+        metadata = compact_india_provenance(getattr(self, "india_provenance", None)) if india is True else None
+        if metadata is not None:
+            data["india_provenance"] = metadata
         return data
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any] | None) -> "TripSnapshot | None":
+    def from_dict(cls, d: dict[str, Any] | None, *, india=False) -> "TripSnapshot | None":
         if not d:
             return None
 
@@ -170,8 +459,9 @@ class TripSnapshot:
                 since_charge_km=_f("since_charge_km"),
                 since_charge_kwh=_f("since_charge_kwh"),
             )
-            if isinstance(d.get("india_provenance"), dict):
-                snapshot.india_provenance = d["india_provenance"]
+            metadata = compact_india_provenance(d.get("india_provenance")) if india is True else None
+            if metadata is not None:
+                snapshot.india_provenance = metadata
             return snapshot
         except (KeyError, TypeError, ValueError):
             return None
@@ -201,15 +491,16 @@ class ChargeSnapshot:
     record_start: float | None = None
     record_end: float | None = None
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self, *, india=False) -> dict[str, Any]:
         # Optional India metadata stays outside the global dataclass/constructor.
         data = asdict(self)
-        if getattr(self, "india_provenance", None) is not None:
-            data["india_provenance"] = self.india_provenance
+        metadata = compact_india_provenance(getattr(self, "india_provenance", None)) if india is True else None
+        if metadata is not None:
+            data["india_provenance"] = metadata
         return data
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any] | None) -> "ChargeSnapshot | None":
+    def from_dict(cls, d: dict[str, Any] | None, *, india=False) -> "ChargeSnapshot | None":
         if not d:
             return None
 
@@ -227,8 +518,9 @@ class ChargeSnapshot:
                 record_start=_f("record_start"),
                 record_end=_f("record_end"),
             )
-            if isinstance(d.get("india_provenance"), dict):
-                snapshot.india_provenance = d["india_provenance"]
+            metadata = compact_india_provenance(d.get("india_provenance")) if india is True else None
+            if metadata is not None:
+                snapshot.india_provenance = metadata
             return snapshot
         except (KeyError, TypeError, ValueError):
             return None
@@ -648,8 +940,8 @@ def charge_end_from_stopped(
         record_start=current.record_start if keep_record else None,
         record_end=current.record_end if keep_record else None,
     )
-    current_origins = getattr(current, "india_provenance", None)
-    stopped_origins = getattr(stopped, "india_provenance", None)
+    current_origins = compact_india_provenance(getattr(current, "india_provenance", None))
+    stopped_origins = compact_india_provenance(getattr(stopped, "india_provenance", None))
     if current_origins is not None or stopped_origins is not None:
         current_origins = current_origins or {}
         stopped_origins = stopped_origins or {}
@@ -669,7 +961,7 @@ def charge_end_from_stopped(
                 "source": "filtered", "operation": "record did not end by stopped reading",
                 "input": origin,
             }
-        selected.india_provenance = origins
+        selected.india_provenance = compact_india_provenance(origins)
     return selected
 
 
@@ -1049,7 +1341,7 @@ def compute_completed_trip(
                 "fuel": "(start.fuel_pct - end.fuel_pct) / 100 * end.tank_litres",
             },
         }
-    return trip
+    return _compact_india_record(trip, "trip")
 
 
 def compute_since_charge_efficiency(
@@ -1136,12 +1428,11 @@ def add_trip_to_driving_tally(
             tally["approximate_trips"] += 1
     tally["since_charge_km"] = round(end_km, 3)
     if trip.get("india_provenance") is not None:
-        previous = tally.get("india_provenance", {})
         tally["india_provenance"] = {
-            "trips": [*previous.get("trips", []), trip["india_provenance"]],
+            "latest_trip": trip["india_provenance"],
             "since_charge_km": (getattr(end, "india_provenance", None) or {}).get("since_charge_km"),
         }
-    return tally
+    return _compact_india_record(tally, "tally")
 
 
 def compute_driving_since_charge(
@@ -1211,7 +1502,7 @@ def compute_driving_since_charge(
                                 if open_start_kwh is not None and open_start_kwh <= total_kwh else None,
             "calculation": "driving distance / driving energy; parked energy = max(0, reference energy - driving energy)",
         }
-    return result
+    return _compact_india_record(result, "driving")
 
 
 def compute_soc_since_reset_efficiency(
@@ -1415,7 +1706,7 @@ def compute_charge_session(
                 "energy_measured": "trapezoidal integral of charge voltage * current at power_record source times; existing edge estimates",
             },
         }
-    return result
+    return _compact_india_record(result, "charge")
 
 
 # A charge never seen live (see reconstruct_unseen_charge) must have raised the
@@ -1565,7 +1856,7 @@ def reconstruct_unseen_charge(
                 "range_added": "end.range_km - start.range_km",
             },
         }
-    return result
+    return _compact_india_record(result, "charge")
 
 
 # HA imports are done lazily inside methods so the pure functions above can be
@@ -1591,8 +1882,13 @@ class TripStatsManager:
     immediately after a restart rather than showing Unknown.
     """
 
-    def __init__(self, hass, entry_id: str, vin: str) -> None:
+    # Pure callers may implement lightweight subclasses without HA setup.
+    # Metadata still requires explicit India context in that case.
+    india = False
+
+    def __init__(self, hass, entry_id: str, vin: str, *, india=False) -> None:
         self._hass = hass
+        self.india = india is True
         self._vin = vin
         self._entry_id = entry_id
         self._store = None  # created in async_load
@@ -1666,6 +1962,19 @@ class TripStatsManager:
         # saved_at.
         self.saved_vehicle_data: dict[str, Any] | None = None
 
+    def _snapshot(self, snapshot):
+        """Optional India metadata cannot change the default snapshot contract."""
+        if snapshot is None or getattr(snapshot, "india_provenance", None) is None:
+            return snapshot
+        selected = replace(snapshot)
+        metadata = compact_india_provenance(snapshot.india_provenance) if self.india else None
+        if metadata is not None:
+            selected.india_provenance = metadata
+        return selected
+
+    def _record(self, record, kind):
+        return _compact_india_record(record, kind, india=self.india)
+
     async def async_load(self) -> None:
         from homeassistant.helpers.storage import Store
 
@@ -1673,50 +1982,50 @@ class TripStatsManager:
             self._hass, STORAGE_VERSION, f"mg_saic_trips_{self._entry_id}_{self._vin}"
         )
         data = await self._store.async_load() or {}
-        self.open_snapshot = TripSnapshot.from_dict(data.get("open_snapshot"))
+        self.open_snapshot = TripSnapshot.from_dict(data.get("open_snapshot"), india=self.india)
         self.open_trip_unplugged = (
-            TripSnapshot.from_dict(data.get("open_trip_unplugged"))
+            TripSnapshot.from_dict(data.get("open_trip_unplugged"), india=self.india)
             if self.open_snapshot
             else None
         )
-        self.last_trip = data.get("last_trip")
-        self.since_charge_baseline = data.get("since_charge_baseline")
+        self.last_trip = self._record(data.get("last_trip"), "trip")
+        self.since_charge_baseline = self._record(data.get("since_charge_baseline"), "snapshot")
         self.last_parked_snapshot = TripSnapshot.from_dict(
-            data.get("last_parked_snapshot")
+            data.get("last_parked_snapshot"), india=self.india
         )
-        self.soc_reset_baseline = data.get("soc_reset_baseline")
-        self.last_parked_soc_reading = data.get("last_parked_soc_reading")
-        self.driving_since_charge = data.get("driving_since_charge")
-        self.open_charge = ChargeSnapshot.from_dict(data.get("open_charge"))
+        self.soc_reset_baseline = self._record(data.get("soc_reset_baseline"), "snapshot")
+        self.last_parked_soc_reading = self._record(data.get("last_parked_soc_reading"), "snapshot")
+        self.driving_since_charge = self._record(data.get("driving_since_charge"), "tally")
+        self.open_charge = ChargeSnapshot.from_dict(data.get("open_charge"), india=self.india)
         self.open_charge_record = (
             data.get("open_charge_record") if self.open_charge else None
         )
         self.charge_paused_snapshot = (
-            ChargeSnapshot.from_dict(data.get("charge_paused_snapshot"))
+            ChargeSnapshot.from_dict(data.get("charge_paused_snapshot"), india=self.india)
             if self.open_charge
             else None
         )
         self.charge_stopped_snapshot = (
-            ChargeSnapshot.from_dict(data.get("charge_stopped_snapshot"))
+            ChargeSnapshot.from_dict(data.get("charge_stopped_snapshot"), india=self.india)
             if self.open_charge
             else None
         )
         self.pre_charge_snapshot = ChargeSnapshot.from_dict(
-            data.get("pre_charge_snapshot")
+            data.get("pre_charge_snapshot"), india=self.india
         )
         self.idle_charge_reading = (
             None
             if self.open_charge
-            else ChargeSnapshot.from_dict(data.get("idle_charge_reading"))
+            else ChargeSnapshot.from_dict(data.get("idle_charge_reading"), india=self.india)
         )
         self.charge_progress = (
-            data.get("charge_progress") if self.open_charge else None
+            self._record(data.get("charge_progress"), "charge") if self.open_charge else None
         )
         self.open_charge_power = (
             data.get("open_charge_power") if self.open_charge else None
         )
-        self.last_charge = data.get("last_charge")
-        self.counter_reset_guard = data.get("counter_reset_guard")
+        self.last_charge = self._record(data.get("last_charge"), "charge")
+        self.counter_reset_guard = self._record(data.get("counter_reset_guard"), "guard")
         self.activity_times = data.get("activity_times")
         self.saved_vehicle_data = data.get("saved_vehicle_data")
 
@@ -1727,55 +2036,55 @@ class TripStatsManager:
         await self._store.async_save(
             {
                 "open_snapshot": (
-                    self.open_snapshot.to_dict() if self.open_snapshot else None
+                    self.open_snapshot.to_dict(india=self.india) if self.open_snapshot else None
                 ),
                 "open_trip_unplugged": (
-                    self.open_trip_unplugged.to_dict()
+                    self.open_trip_unplugged.to_dict(india=self.india)
                     if self.open_snapshot and self.open_trip_unplugged
                     else None
                 ),
-                "last_trip": self.last_trip,
-                "since_charge_baseline": self.since_charge_baseline,
+                "last_trip": self._record(self.last_trip, "trip"),
+                "since_charge_baseline": self._record(self.since_charge_baseline, "snapshot"),
                 "last_parked_snapshot": (
-                    self.last_parked_snapshot.to_dict()
+                    self.last_parked_snapshot.to_dict(india=self.india)
                     if self.last_parked_snapshot
                     else None
                 ),
-                "soc_reset_baseline": self.soc_reset_baseline,
-                "last_parked_soc_reading": self.last_parked_soc_reading,
-                "driving_since_charge": self.driving_since_charge,
+                "soc_reset_baseline": self._record(self.soc_reset_baseline, "snapshot"),
+                "last_parked_soc_reading": self._record(self.last_parked_soc_reading, "snapshot"),
+                "driving_since_charge": self._record(self.driving_since_charge, "tally"),
                 "open_charge": (
-                    self.open_charge.to_dict() if self.open_charge else None
+                    self.open_charge.to_dict(india=self.india) if self.open_charge else None
                 ),
                 "open_charge_record": self.open_charge_record,
                 "charge_paused_snapshot": (
-                    self.charge_paused_snapshot.to_dict()
+                    self.charge_paused_snapshot.to_dict(india=self.india)
                     if self.charge_paused_snapshot
                     else None
                 ),
                 "charge_stopped_snapshot": (
-                    self.charge_stopped_snapshot.to_dict()
+                    self.charge_stopped_snapshot.to_dict(india=self.india)
                     if self.open_charge and self.charge_stopped_snapshot
                     else None
                 ),
                 "pre_charge_snapshot": (
-                    self.pre_charge_snapshot.to_dict()
+                    self.pre_charge_snapshot.to_dict(india=self.india)
                     if self.pre_charge_snapshot
                     else None
                 ),
                 "idle_charge_reading": (
-                    self.idle_charge_reading.to_dict()
+                    self.idle_charge_reading.to_dict(india=self.india)
                     if self.idle_charge_reading
                     else None
                 ),
                 "charge_progress": (
-                    self.charge_progress if self.open_charge else None
+                    self._record(self.charge_progress, "charge") if self.open_charge else None
                 ),
                 "open_charge_power": (
                     self.open_charge_power if self.open_charge else None
                 ),
-                "last_charge": self.last_charge,
-                "counter_reset_guard": self.counter_reset_guard,
+                "last_charge": self._record(self.last_charge, "charge"),
+                "counter_reset_guard": self._record(self.counter_reset_guard, "guard"),
                 "activity_times": self.activity_times,
                 "saved_vehicle_data": self.saved_vehicle_data,
             }
@@ -1788,6 +2097,7 @@ class TripStatsManager:
         so rebase to the new low. Returns True if the baseline changed (caller
         may persist). Called every poll from the coordinator.
         """
+        india_provenance = compact_india_provenance(india_provenance) if self.india else None
         if km is None:
             return False
         if self.since_charge_baseline is None:
@@ -1834,6 +2144,7 @@ class TripStatsManager:
 
         Returns True if any tracked state changed (caller may persist).
         """
+        india_provenance = compact_india_provenance(india_provenance) if self.india else None
         if soc_pct is None or odometer_km is None:
             return False
 
@@ -1923,6 +2234,7 @@ class TripStatsManager:
         opening). After a Home Assistant restart the stored figure stands,
         with its ``as_of``, until the first reading of the car replaces it.
         """
+        snapshot = self._snapshot(snapshot)
         progress = charge_session_progress(
             self.open_charge,
             snapshot,
@@ -1937,7 +2249,7 @@ class TripStatsManager:
                     "end": getattr(snapshot, "india_provenance", None),
                     "calculation": "charge record stretches and elapsed chargingDuration, or session boundary duration",
                 }
-            self.charge_progress = progress
+            self.charge_progress = self._record(progress, "charge")
 
     def charge_session(self) -> dict[str, Any] | None:
         """The charge in progress, or failing that the last one finished.
@@ -1950,7 +2262,7 @@ class TripStatsManager:
         """
         if getattr(self, "open_charge", None) is not None:
             progress = getattr(self, "charge_progress", None)
-            return {**progress, "in_progress": True} if progress else None
+            return self._record({**progress, "in_progress": True}, "charge") if progress else None
         charge = getattr(self, "last_charge", None)
         if not charge or charge.get("duration_s") is None:
             return None
@@ -1960,9 +2272,13 @@ class TripStatsManager:
             "paused_s": int(charge.get("paused_s") or 0),
             "in_progress": False,
         }
-        for key in ("duration_source", "charge_start_ts", "charge_end_ts", "india_provenance"):
+        for key in ("duration_source", "charge_start_ts", "charge_end_ts"):
             if charge.get(key) is not None:
                 session[key] = charge[key]
+        if self.india and charge.get("india_provenance") is not None:
+            metadata = compact_india_provenance(charge["india_provenance"], kind="charge")
+            if metadata is not None:
+                session["india_provenance"] = metadata
         return session
 
     def note_charge_state(
@@ -2004,6 +2320,7 @@ class TripStatsManager:
         goes quiet the moment a session completes, so treating a dropout as an
         end-of-charge would record a phantom session on every outage.
         """
+        snapshot = self._snapshot(snapshot)
         if snapshot is None:
             return None, False
 
@@ -2107,6 +2424,7 @@ class TripStatsManager:
             self.charge_progress = None
             self.open_charge_power = None
             if unseen is not None:
+                unseen = self._record(unseen, "charge")
                 self.last_charge = unseen
                 return unseen, True
             return None, changed
@@ -2179,6 +2497,7 @@ class TripStatsManager:
             return None, True
         if capacity_input is not None:
             charge.setdefault("india_provenance", {})["capacity_kwh"] = capacity_input
+        charge = self._record(charge, "charge")
         self.last_charge = charge
         return charge, True
 
@@ -2188,6 +2507,7 @@ class TripStatsManager:
         charge against if the car has moved on by the time the charging data
         comes back (see charge_end_from_stopped). Returns True when stored.
         """
+        snapshot = self._snapshot(snapshot)
         if (
             self.open_charge is None
             or snapshot is None
@@ -2207,6 +2527,7 @@ class TripStatsManager:
         two rapid polls can't both open (the second sees open_snapshot set).
         Callers persist via async_save afterwards.
         """
+        snapshot = self._snapshot(snapshot)
         if self.open_snapshot is not None:
             return False
         self.open_snapshot = snapshot
@@ -2219,6 +2540,7 @@ class TripStatsManager:
         Not a state change worth a save on its own: it moves on every poll of
         a drive and is stored whenever something else is.
         """
+        snapshot = self._snapshot(snapshot)
         if self.open_snapshot is not None and snapshot is not None:
             self.open_trip_unplugged = snapshot
 
@@ -2251,6 +2573,7 @@ class TripStatsManager:
         ``at_plug_in``: the trip is being closed because the cable went in
         while the car was still on, rather than at power-off.
         """
+        snapshot = self._snapshot(snapshot)
         start = self.open_snapshot
         before_charge = getattr(self, "open_trip_unplugged", None) or start
         self.open_snapshot = None
@@ -2318,6 +2641,7 @@ class TripStatsManager:
                 self.since_charge_baseline["india_provenance"] = getattr(end, "india_provenance", None)
         self.last_parked_snapshot = end
         if trip is not None:
+            trip = self._record(trip, "trip")
             self.driving_since_charge = add_trip_to_driving_tally(
                 getattr(self, "driving_since_charge", None), trip, start, end
             )
@@ -2343,6 +2667,7 @@ class TripStatsManager:
         advances the parked baseline. Returns the trip, or None when there was
         no baseline yet or no meaningful movement.
         """
+        snapshot = self._snapshot(snapshot)
         start = self.last_parked_snapshot
         if (
             start is None
@@ -2382,6 +2707,7 @@ class TripStatsManager:
         against the current reading (or abandon it, clearing state, if we have no
         reading). Returns the trip, or None if nothing was stale.
         """
+        snapshot = self._snapshot(snapshot)
         if self.open_snapshot is None:
             return None
         age = _duration_seconds(self.open_snapshot.ts, now_iso)
