@@ -57,6 +57,7 @@ Last Powered On, Last Powered Off and Last Vehicle Activity are saved by the int
 - Charging Current *(negative while the battery is giving power out; see [Negative charging power and current](#negative-charging-power-and-current))*
 - Charging Current Limit
 - Charging Power *(negative while the battery is giving power out, as above)*
+  *(Charging Power and Charging Current both have `held` and `reading_time` attributes from 1.4.0-beta17: see [Is the value current?](power-management.md#is-the-charging-power-or-current-value-current))*
 - Requested Charging Current *(from 1.3.0-beta12; **MGS6 only for now** — see [Sensors that depend on the model](#sensors-that-depend-on-the-model))*
 - Charger Input Voltage / Charger Input Current / Charger Input Power *(from 1.3.0-beta12; AC side of the on-board charger; **MGS6, and MG4 Electric from 1.4.0-beta15** — see [Sensors that depend on the model](#sensors-that-depend-on-the-model))*
 - Estimated Range After Charging *(the range expected when the current charge completes — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
