@@ -321,6 +321,33 @@ VEHICLE_PROFILES = {
         # but set explicitly so the profile is self-describing.
         "supports_target_soc": False,
     },
+    "ZS32": {  # MG ZS Hybrid+ (2025, HEV; series 'ZS32 EU') — see #441
+        # Same hybrid system as the MG3 Hybrid+ (ZP22), and it behaves the
+        # same way (owner's tests, 18 Oct 2026):
+        # - the iSmart app's HIGH and LOW both make the car report
+        #   remoteClimateStatus=2 (HIGH also starts the engine for heat);
+        # - our full climate command (control_climate, with the fan byte)
+        #   is echoed as status 3 with the A/C light on, but the fan never
+        #   blows -- so route Cool / Heat / the presets through start_ac;
+        # - only the driver window is reported (WINDOW bitmask 1000, and the
+        #   app shows only that one).
+        # Temperature range copied from the MG3 Hybrid+ for now; the app
+        # shows MIN, 18-32 C, MAX, so the index scale is still to be
+        # confirmed on this car. The petrol ZS may share the series code.
+        "min_temp": 16,
+        "max_temp": 30,
+        "temp_offset": 2,
+        "battery_capacity_kwh": None,
+        # 41 L petrol tank, from the owner (#441).
+        "fuel_tank_litres": 41.0,
+        "climate_status_cool": {2},
+        "climate_status_fan_only": set(),
+        "cool_uses_start_ac": True,
+        "has_front_defrost": False,
+        "has_front_passenger_window": False,
+        "has_rear_windows": False,
+        "supports_target_soc": False,
+    },
     "EH32": {  # MG4 Electric
         # Charger input readings (#408), same scales as the MGS6. Checked on
         # an owner's log (#419), 11 Oct 2026, AC charging overnight:
