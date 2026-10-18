@@ -38,6 +38,7 @@ from .const import (
     DATA_100_DECIMAL_CORRECTION,
 )
 from .logic import (
+    CHARGING_DATA_FRESHNESS_LIVE,
     CHARGING_DATA_FRESHNESS_STATES,
     apply_energy_correction,
     corrected_aux_voltage,
@@ -54,6 +55,49 @@ from .trip_stats import (
 def _negative_charging_allowed(coordinator):
     """The owner wants negative Charging Power / Current shown as reported (#442)."""
     return getattr(coordinator, "allow_negative_charging_power", False) is True
+
+
+def _note_charging_reading(sensor):
+    """Whether Charging Power / Current is showing this poll's reading (#442).
+
+    ``sensor._kind`` says where the value just returned came from:
+
+    - ``fresh``: worked out from the charging reply. Counts as read only when
+      Charging Data Freshness is live, so a reply kept from earlier (the saved
+      one shown at startup, say) is not taken for a new reading.
+    - ``status``: 0 because the car's status says it isn't charging while
+      the charging reply is missing; read at that poll.
+    - ``held``: the last value, kept because the figure was the car's "no
+      value" (-128) or the charging reply didn't come back.
+    - ``none``: nothing to show.
+    """
+    kind = getattr(sensor, "_kind", None)
+    freshness = getattr(sensor.coordinator, "charging_freshness", None)
+    state = getattr(freshness, "state", None) if freshness is not None else None
+    if kind == "fresh" and freshness is not None and state != CHARGING_DATA_FRESHNESS_LIVE:
+        kind = "held"
+    if kind == "fresh":
+        sensor._held = False
+        sensor._reading_time = getattr(freshness, "last_success", None)
+    elif kind == "status":
+        sensor._held = False
+        sensor._reading_time = getattr(freshness, "last_attempt", None)
+    elif kind == "held":
+        sensor._held = True
+    else:
+        sensor._held = None
+
+
+def _charging_reading_attributes(sensor):
+    """``held`` / ``reading_time`` for Charging Power and Current (#442)."""
+    held = getattr(sensor, "_held", None)
+    if held is None:
+        return None
+    reading_time = getattr(sensor, "_reading_time", None)
+    return {
+        "held": held,
+        "reading_time": reading_time.isoformat() if reading_time else None,
+    }
 
 
 def _stopped_per_status(coordinator):
@@ -2145,6 +2189,11 @@ class SAICMGChargingCurrentSensor(CoordinatorEntity, SensorEntity):
         # Last value this sensor displayed from a live poll (including the
         # explicit "not charging -> 0"), held across charging-data drop-outs.
         self._last_valid_current: float | None = None
+        # Whether the value shown is this poll's reading, and when it was
+        # read (#442): see _note_charging_reading.
+        self._kind = None
+        self._held = None
+        self._reading_time = None
 
     @property
     def unique_id(self):
@@ -2170,6 +2219,16 @@ class SAICMGChargingCurrentSensor(CoordinatorEntity, SensorEntity):
     @property
     def native_value(self):
         """Return the state of the sensor."""
+        value = self._current_value()
+        _note_charging_reading(self)
+        return value
+
+    @property
+    def extra_state_attributes(self):
+        return _charging_reading_attributes(self)
+
+    def _current_value(self):
+        self._kind = "none"
         try:
             charging_data = getattr(
                 self.coordinator.data.get("charging"), self._data_source, None
@@ -2183,6 +2242,7 @@ class SAICMGChargingCurrentSensor(CoordinatorEntity, SensorEntity):
                     # replaying the last session's current (#262).
                     # Note: status 13 (V2X_DISCHARGING) is NOT suppressed here — real current flows.
                     self._last_valid_current = 0
+                    self._kind = "fresh"
                     return 0
 
                 raw_value = getattr(charging_data, self._field, None)
@@ -2196,6 +2256,7 @@ class SAICMGChargingCurrentSensor(CoordinatorEntity, SensorEntity):
                             self._name,
                             self._last_valid_current,
                         )
+                        self._kind = "held"
                         return self._last_valid_current
                     return None
 
@@ -2223,11 +2284,13 @@ class SAICMGChargingCurrentSensor(CoordinatorEntity, SensorEntity):
                         calculated_value = 0.0
 
                     self._last_valid_current = calculated_value
+                    self._kind = "fresh"
                     return calculated_value
                 else:
                     return None
             elif _stopped_per_status(self.coordinator):
                 self._last_valid_current = 0
+                self._kind = "status"
                 return 0
             else:
                 LOGGER.debug("No charging data available for %s", self._name)
@@ -2248,6 +2311,7 @@ class SAICMGChargingCurrentSensor(CoordinatorEntity, SensorEntity):
                 self._name,
                 self._last_valid_current,
             )
+            self._kind = "held"
             return self._last_valid_current
         return None
 
@@ -2299,6 +2363,11 @@ class SAICMGChargingPowerSensor(CoordinatorEntity, SensorEntity):
         # Last value this sensor displayed from a live poll (including the
         # explicit "not charging -> 0"), held across charging-data drop-outs.
         self._last_valid_power: float | None = None
+        # Whether the value shown is this poll's reading, and when it was
+        # read (#442): see _note_charging_reading.
+        self._kind = None
+        self._held = None
+        self._reading_time = None
 
     @property
     def unique_id(self):
@@ -2324,6 +2393,16 @@ class SAICMGChargingPowerSensor(CoordinatorEntity, SensorEntity):
     @property
     def native_value(self):
         """Return the state of the sensor."""
+        value = self._power_value()
+        _note_charging_reading(self)
+        return value
+
+    @property
+    def extra_state_attributes(self):
+        return _charging_reading_attributes(self)
+
+    def _power_value(self):
+        self._kind = "none"
         try:
             charging_data = getattr(
                 self.coordinator.data.get("charging"), self._data_source, None
@@ -2336,6 +2415,7 @@ class SAICMGChargingPowerSensor(CoordinatorEntity, SensorEntity):
                     # and hold it (see SAICMGChargingCurrentSensor, #262).
                     # Note: status 13 (V2X_DISCHARGING) is NOT suppressed — real power flows.
                     self._last_valid_power = 0
+                    self._kind = "fresh"
                     return 0
 
                 raw_current = getattr(charging_data, "bmsPackCrnt", None)
@@ -2350,6 +2430,7 @@ class SAICMGChargingPowerSensor(CoordinatorEntity, SensorEntity):
                             self._name,
                             self._last_valid_power,
                         )
+                        self._kind = "held"
                         return self._last_valid_power
                     return None
 
@@ -2374,11 +2455,13 @@ class SAICMGChargingPowerSensor(CoordinatorEntity, SensorEntity):
                         power = 0.0
 
                     self._last_valid_power = power
+                    self._kind = "fresh"
                     return power
                 else:
                     return None
             elif _stopped_per_status(self.coordinator):
                 self._last_valid_power = 0
+                self._kind = "status"
                 return 0
             else:
                 LOGGER.debug("No charging data available for %s", self._name)
@@ -2394,6 +2477,7 @@ class SAICMGChargingPowerSensor(CoordinatorEntity, SensorEntity):
                 self._name,
                 self._last_valid_power,
             )
+            self._kind = "held"
             return self._last_valid_power
         return None
 
