@@ -49,6 +49,7 @@ from .trip_stats import (
     compute_driving_since_charge,
     compute_since_charge_efficiency,
     compute_soc_since_reset_efficiency,
+    measured_capacity,
 )
 
 
@@ -822,6 +823,9 @@ async def async_setup_entry(hass, entry, async_add_entities):
                 # across the session, since the API only reports energy taken
                 # back out afterwards.
                 sensors.append(SAICMGLastChargeEnergySensor(coordinator, entry))
+                # The battery's usable capacity, measured from big charges and
+                # averaged, to watch for battery fade.
+                sensors.append(SAICMGMeasuredBatteryCapacitySensor(coordinator, entry))
                 # How much energy is in the battery right now (kWh).
                 sensors.append(SAICMGBatteryEnergySensor(coordinator, entry))
                 sensors.append(SAICMGLastChargeRangeSensor(coordinator, entry))
@@ -2643,6 +2647,29 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
         # See #238.
         return self.coordinator.last_update_success
 
+    def _range_after_charge_snapshot(self):
+        trip_stats = getattr(self.coordinator, "trip_stats", None)
+        return getattr(trip_stats, "range_after_charge", None) if trip_stats else None
+
+    def _range_after_charge_held(self):
+        """Estimated Range After Charging while unplugged, or None to follow the car.
+
+        Holds the figure from the last time the car was plugged in. With no
+        such figure yet (first install while unplugged), the car's current
+        one is taken once and held from then on.
+        """
+        self._range_held = False
+        plugged = getattr(self.coordinator, "range_after_charge_plugged_in", None)
+        if plugged is None or plugged() is not False:
+            return None
+        snapshot = self._range_after_charge_snapshot()
+        if not snapshot or snapshot.get("value_km") is None:
+            return None
+        self._range_held = True
+        self._last_source = snapshot.get("source")
+        self._last_valid_value = snapshot["value_km"]
+        return snapshot["value_km"]
+
     @property
     def extra_state_attributes(self):
         """Expose which source produced the value, for totalBatteryCapacity only.
@@ -2659,7 +2686,16 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
             # because the two were computed by unrelated code paths.
             if self.native_value is None:
                 return None
-            return {"source": self._last_source} if self._last_source else None
+            attrs = {"source": self._last_source} if self._last_source else {}
+            snapshot = self._range_after_charge_snapshot()
+            if snapshot:
+                attrs["basis"] = (
+                    "last_charge" if getattr(self, "_range_held", False) else "plugged_in"
+                )
+                for key in ("electric_range_km", "soc_pct", "target_soc_pct", "as_of"):
+                    if snapshot.get(key) is not None:
+                        attrs[key] = snapshot[key]
+            return attrs or None
         if self._field != "totalBatteryCapacity":
             return None
         # Reported, not inferred. This used to guess "profile" from
@@ -2710,6 +2746,11 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
                 # is actually the projection must never be labelled
                 # "reported" — so both are decided together and cached.
                 if self._field == "imcuChrgngEstdElecRng":
+                    # Between charges: the figure from the last time the car
+                    # was plugged in, not the car's running recalculation.
+                    held = self._range_after_charge_held()
+                    if held is not None:
+                        return held
                     value, source = None, None
                     if not self._is_invalidated(charging_data):
                         reported = getattr(charging_data, self._field, None)
@@ -2722,6 +2763,9 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
                     self._last_source = source
                     if value is not None:
                         self._last_valid_value = value
+                        note = getattr(self.coordinator, "note_range_after_charge", None)
+                        if note is not None:
+                            note(value, source)
                         return value
                     # Neither source has anything fresh this poll. Hold the
                     # last good figure and say so, rather than blink to
@@ -4061,6 +4105,79 @@ class SAICMGBatteryEnergySensor(CoordinatorEntity, SensorEntity):
         capacity = self.coordinator.effective_battery_capacity_kwh
         if capacity:
             attrs["usable_capacity_kWh"] = capacity
+        return attrs
+
+
+class SAICMGMeasuredBatteryCapacitySensor(CoordinatorEntity, SensorEntity):
+    """Battery Capacity (Measured Over Time).
+
+    The battery's usable capacity worked out from the integration's own
+    measurements: on each big charge (30%+ added), the energy measured going
+    into the pack divided by the % added -- 25 kWh for 33% is 75.8 kWh. The
+    state is the average of the last five such charges. Unlike Estimated
+    Range After Charging it doesn't depend on driving, weather or the target
+    SOC, so its trend over months is a fair view of battery fade (asked for by
+    an IM6 owner wanting evidence for MG). Measured at the battery, so a bit
+    below the nominal pack size.
+    """
+
+    def __init__(self, coordinator, entry):
+        super().__init__(coordinator)
+        self._name = "Battery Capacity (Measured Over Time)"
+        self._attr_icon = "mdi:battery-heart-variant"
+        self._attr_device_class = SensorDeviceClass.ENERGY_STORAGE
+        self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+        self._attr_state_class = "measurement"
+        vin_info = coordinator.vin_info
+        self._unique_id = f"{entry.entry_id}_{vin_info.vin}_battery_capacity_measured"
+        self._device_info = create_device_info(coordinator, entry.entry_id)
+
+    @property
+    def unique_id(self):
+        return self._unique_id
+
+    @property
+    def name(self):
+        vin_info = self.coordinator.vin_info
+        return f"{vin_info.brandName} {vin_info.modelName} {self._name}"
+
+    @property
+    def device_info(self):
+        return self._device_info
+
+    @property
+    def available(self):
+        # Unknown, not unavailable, until the first qualifying charge.
+        return True
+
+    def _samples(self):
+        stats = getattr(self.coordinator, "trip_stats", None)
+        return list(getattr(stats, "capacity_samples", None) or []) if stats else []
+
+    @property
+    def native_value(self):
+        return measured_capacity(self._samples())
+
+    @property
+    def extra_state_attributes(self):
+        samples = self._samples()
+        if not samples:
+            return None
+        latest = samples[-1]
+        attrs = {
+            "charges_in_average": len(samples),
+            "latest_charge_capacity_kWh": latest.get("capacity_kWh"),
+            "latest_charge_energy_kWh": latest.get("energy_kWh"),
+            "latest_charge_soc_added_pct": latest.get("soc_added_pct"),
+            "latest_charge_at": latest.get("at"),
+            "recent_charges_kWh": [s.get("capacity_kWh") for s in samples],
+        }
+        average = measured_capacity(samples)
+        usable = getattr(self.coordinator, "effective_battery_capacity_kwh", None)
+        if usable:
+            attrs["usable_capacity_kWh"] = usable
+            if average:
+                attrs["percent_of_usable"] = round(average / usable * 100.0, 1)
         return attrs
 
 

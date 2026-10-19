@@ -2095,6 +2095,50 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         mapped = TARGET_SOC_PERCENT_BY_CODE.get(code)
         return mapped if mapped is not None else 100.0
 
+    def range_after_charge_plugged_in(self):
+        """Whether Estimated Range After Charging should follow the car now.
+
+        True while the cable is in (see _cable_state), and when there is no
+        charging frame to tell, so a drop-out doesn't freeze it mid-charge.
+        """
+        frame = (self.data or {}).get("charging")
+        if frame is None:
+            return None
+        return self._cable_state(frame)[0]
+
+    def note_range_after_charge(self, value_km, source):
+        """Keep the figure shown while plugged in, for between charges.
+
+        Between charges the car keeps recalculating it from the range per 1%
+        of battery and the target SOC, so it moved with every drive and every
+        target change (an MGS6: 508 km on the drive, 377 km the next day, all
+        from the target going 100% -> 80% and a long cold drive; an IM6
+        wobbling 520-591 km through a day's driving). It now holds what it
+        was when last plugged in, with what it was made of.
+        """
+        trip_stats = getattr(self, "trip_stats", None)
+        if trip_stats is None or value_km is None:
+            return
+        data = self.data or {}
+        status = data.get("status")
+        basic = getattr(status, "basicVehicleStatus", None) if status else None
+        frame = data.get("charging")
+        snapshot = {
+            "value_km": round(float(value_km), 1),
+            "source": source,
+            "electric_range_km": electric_range_km(
+                basic, frame, factor=DATA_DECIMAL_CORRECTION
+            ),
+            "soc_pct": self._extract_soc_pct(basic, frame),
+            "target_soc_pct": self._target_soc_pct(frame),
+        }
+        held = trip_stats.range_after_charge or {}
+        if {k: held.get(k) for k in snapshot} == snapshot:
+            return
+        snapshot["as_of"] = datetime.now(timezone.utc).isoformat()
+        trip_stats.range_after_charge = snapshot
+        self._schedule_trip_save()
+
     def projected_range_after_charging_km(self):
         """Our own estimate of the range at the end of this charge, or None.
 

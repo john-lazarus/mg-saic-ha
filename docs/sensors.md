@@ -60,7 +60,7 @@ Last Powered On, Last Powered Off and Last Vehicle Activity are saved by the int
   *(Charging Power and Charging Current both have `held` and `reading_time` attributes from 1.4.0-beta17: see [Is the value current?](power-management.md#is-the-charging-power-or-current-value-current))*
 - Requested Charging Current *(from 1.3.0-beta12; **MGS6 only for now** — see [Sensors that depend on the model](#sensors-that-depend-on-the-model))*
 - Charger Input Voltage / Charger Input Current / Charger Input Power *(from 1.3.0-beta12; AC side of the on-board charger; **MGS6, and MG4 Electric from 1.4.0-beta15** — see [Sensors that depend on the model](#sensors-that-depend-on-the-model))*
-- Estimated Range After Charging *(the range expected when the current charge completes — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
+- Estimated Range After Charging *(the range expected when the current charge completes; between charges, the figure from when the car was last plugged in — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
 - Target SOC *(read-only mirror of the Target SOC slider — shown only on models where the iSmart app supports it)*
 - Charging Duration *(the car's own counter: it starts again from zero if charging pauses and restarts, even for a few seconds — for the whole charge see **Charge Session Duration** and **Last Charge Duration** below)*
 - Remaining Charging Time
@@ -73,6 +73,7 @@ Last Powered On, Last Powered Off and Last Vehicle Activity are saved by the int
 - Efficiency Since Charge (SOC) *(BEV/PHEV; km/kWh, an SOC/odometer-only alternative independent of the counters above — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
 - Last Charge Range Added *(BEV/PHEV; electric range the last completed charge put back — shown in your Home Assistant unit system, so miles if that's what you use)*
 - Last Charge Energy *(BEV/PHEV; kWh put **into** the battery by the last completed charge — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
+- Battery Capacity (Measured Over Time) *(BEV/PHEV, from 1.4.0-beta19; kWh, the battery's usable capacity measured on your own big charges, averaged over the last five — for watching battery fade. See [Battery Capacity (Measured Over Time)](#battery-capacity-measured-over-time))*
 - Last Charge Duration *(BEV/PHEV; how long the last completed charge spent charging, pauses left out — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
 - Charge Session Duration *(BEV/PHEV; how long the charge in progress has spent charging so far, counting up across pauses, then the total once it ends — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
 - Last Trip Distance *(distance driven on the last completed drive)*
@@ -195,6 +196,37 @@ Before 1.3.0-beta9 only the last stretch was counted: a 1 h 44 min charge at abo
 Before 1.4.0-beta3 such a charge was not recorded at all, and Last Charge kept showing the previous one (#269).
 
 
+### Battery Capacity (Measured Over Time)
+
+*(BEV/PHEV, from 1.4.0-beta19)* This sensor shows how much energy your battery actually holds, worked out from your own charges. Its trend over months is the thing to watch for battery fade. **Estimated Range After Charging** can't show fade, because it moves with your driving, the weather and the target SOC.
+
+**How it's measured.** At the end of each charge, the energy measured going into the battery (`energy_measured_kWh` on **Last Charge Energy**) is divided by the % added. For example, 25 kWh for 33% works out at 75.8 kWh for the whole battery. The sensor shows the average of the last five charges that count.
+
+**Which charges count.** Only charges that can give a fair figure:
+
+- at least 30% added — on a small charge, the battery percentage being whole numbers makes too much difference;
+- at least three power readings during the charge;
+- no more than a quarter of the energy filled in rather than measured (`energy_measured_estimated_kWh`).
+
+Other charges are simply left out, so the sensor doesn't change. It reads unknown until the first charge that counts. On a 30-minute polling interval a long overnight charge counts; a short top-up won't. On first install it starts from your last charge, if that one counts.
+
+| Attribute | What it is |
+|---|---|
+| `charges_in_average` | How many charges the state is averaged over (up to 5) |
+| `recent_charges_kWh` | The figure from each of those charges, oldest first |
+| `latest_charge_capacity_kWh` | The figure from the most recent charge that counted |
+| `latest_charge_energy_kWh` / `latest_charge_soc_added_pct` | What that figure was worked out from |
+| `latest_charge_at` | When that charge ended |
+| `usable_capacity_kWh` | The usable capacity the integration uses for your car (**Total Battery Capacity**) |
+| `percent_of_usable` | The measured figure as a % of that |
+
+**Reading it.**
+
+- Expect a spread of a kWh or two between charges. The average smooths that out; a steady fall over months is what matters.
+- It is measured at the battery, so it is a little below the pack size MG quotes and well below what your wall charger meters (see the next section).
+- Cold batteries and very slow charges can read a little differently from warm, fast ones. Compare like with like over the seasons.
+- `percent_of_usable` near 100% means the battery holds what the integration expects. If it's consistently far off on a new car, the usable capacity figure itself may be wrong for your model — see [Battery capacity override](#battery-capacity-override).
+
 ### Working out your charging losses
 
 A common question is why the energy your wall charger reports is higher than **Last Charge Energy**. It's not an error in either figure — they measure different things:
@@ -262,6 +294,22 @@ Where the car doesn't populate it the sensor reads unknown rather than `0`, so a
 **Estimated Range After Charging** shows the range you'll have when the current charge finishes. The car usually works this out itself, but some models never do: on an MG HS PHEV the field stays at `0` throughout a charge, as does its discharging equivalent, so that car appears not to compute range estimates at all.
 
 Where the car gives no usable figure, the integration projects one instead, from the electric range and battery percentage the car does report, scaled to whatever the charge is heading for — the target SOC where one is set, or 100% where there isn't. It needs no battery capacity, so a [capacity override](#battery-capacity-override) has no effect on it. Checked against a car reporting both: 257 km at 51.7% with an 80% target projects to 398 km, where the car itself said 410.
+
+**What it's made of:** it's the range the car expects once charged to your **target SOC**, in effect *electric range ÷ battery % × target %*. So it moves when the target changes, not just when the battery does. On an MGS6, setting the target from 80% to 100% took it from 394 to 508 km (245 to 316 mi) in the same second, and setting it back took it from 500 to 389 km (311 to 242 mi).
+
+**Between charges** *(from 1.4.0-beta19)*: the car keeps recalculating this figure as you drive, from its latest range per 1% of battery (which changes with speed, temperature and heating) and whatever the target is now. So it used to drift and wobble between charges, which could look like lost range (an MGS6 went from 508 to 377 km (316 to 234 mi) overnight on a target change and one long, cold drive; an IM6 wobbled between 520 and 591 km (323 and 367 mi) through a day's driving). Now, once the car is unplugged, it **keeps the figure from when it was last plugged in** until you plug in again, and then follows the car as before. It's kept through a restart. The attributes say what the figure was made of:
+
+| Attribute | Meaning |
+|---|---|
+| `basis` | `plugged_in` while the car is plugged in and the figure follows it; `last_charge` while unplugged and it's held |
+| `electric_range_km` | The electric range at that point (km) |
+| `soc_pct` | The battery % at that point |
+| `target_soc_pct` | The target SOC it was worked out for |
+| `as_of` | When that figure was last updated |
+
+If the car is unplugged when you first install this version, the figure at that moment is kept until your next charge.
+
+**It isn't a battery health measure.** The car's range per 1% depends on recent driving, so the same healthy battery shows quite different figures in summer and winter. To track the battery itself, use [Battery Capacity (Measured Over Time)](#battery-capacity-measured-over-time), which measures the usable capacity on each big charge.
 
 A `source` attribute says which you're looking at: `reported` when it's the car's own figure, `estimated` when it's ours, or `stale` on the rare poll where neither is available and the last good figure is being held. The car's figure is always preferred when it's live; the moment the car stops providing one — including flagging its existing figure as no longer valid — the sensor switches to the projection rather than continuing to display whatever the car last said. The projection is skipped below about 12% battery, where a percentage point of noise swings the result too far to be useful, and the sensor reads unknown rather than guessing. On a car with no target SOC the estimate assumes a charge to full, so it will read optimistically if you unplug early.
 
