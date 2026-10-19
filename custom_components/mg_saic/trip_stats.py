@@ -342,6 +342,18 @@ def _session_car_window(car_window, tracker):
 # says too little about what happened in between.
 MEASURED_ENERGY_MAX_EDGE_S = 3600
 
+# Battery Capacity (Measured Over Time): the usable capacity worked out from
+# each big charge, as measured energy in / % added. Only charges that add at
+# least this much count -- on a small one the % rounding swamps it.
+CAPACITY_MIN_SOC_ADDED_PCT = 30.0
+# ...whose measured energy is mostly measured, not filled in at the ends...
+CAPACITY_MAX_ESTIMATED_SHARE = 0.25
+# ...from at least this many power readings.
+CAPACITY_MIN_SAMPLES = 3
+# The sensor shows the average of the last few, to smooth a few percent of
+# per-charge noise.
+CAPACITY_AVERAGE_OF = 5
+
 
 def _add_power_reading(tracker, at, power_kw):
     """One more reading on the running total (``tracker`` is already a copy)."""
@@ -423,6 +435,45 @@ def track_charge_power(tracker, ts, power_kw, *, charging=False):
         tracker["held_zero_ts"] = at
         return tracker
     return _add_power_reading(tracker, at, power_kw)
+
+
+def capacity_sample(charge):
+    """The battery's usable capacity as measured on one charge, or None.
+
+    Measured energy into the pack divided by the % it added: 25 kWh for 33%
+    is 75.8 kWh. Unlike the range figures this doesn't depend on driving or
+    weather, so its trend over months shows battery fade. Only big charges
+    whose energy was mostly measured count (see CAPACITY_*).
+    """
+    if not isinstance(charge, dict):
+        return None
+    energy = charge.get("energy_measured_kWh")
+    added = charge.get("soc_added_pct")
+    edges = charge.get("energy_measured_estimated_kWh") or 0.0
+    samples = charge.get("energy_measured_samples") or 0
+    if not isinstance(energy, (int, float)) or not isinstance(added, (int, float)):
+        return None
+    if energy <= 0 or added < CAPACITY_MIN_SOC_ADDED_PCT:
+        return None
+    if samples < CAPACITY_MIN_SAMPLES or edges > energy * CAPACITY_MAX_ESTIMATED_SHARE:
+        return None
+    capacity = energy / added * 100.0
+    if not 5.0 <= capacity <= 250.0:
+        return None
+    return {
+        "at": charge.get("charge_end_ts") or charge.get("end_ts"),
+        "capacity_kWh": round(capacity, 1),
+        "energy_kWh": round(float(energy), 3),
+        "soc_added_pct": round(float(added), 1),
+    }
+
+
+def measured_capacity(samples):
+    """Average of the last CAPACITY_AVERAGE_OF capacity samples, or None."""
+    recent = [s for s in (samples or []) if isinstance(s, dict)][-CAPACITY_AVERAGE_OF:]
+    if not recent:
+        return None
+    return round(sum(s["capacity_kWh"] for s in recent) / len(recent), 1)
 
 
 def measured_charge_energy(tracker, *, charge_start=None, charge_end=None):
@@ -1569,6 +1620,21 @@ class TripStatsManager:
         # was plugged in, shown between charges. Keys: value_km, source,
         # electric_range_km, soc_pct, target_soc_pct, as_of.
         self.range_after_charge: dict[str, Any] | None = None
+        # Battery Capacity (Measured Over Time): one entry per qualifying
+        # charge (see capacity_sample), newest last, last few kept.
+        self.capacity_samples: list[dict[str, Any]] = []
+
+    def note_capacity_sample(self, charge) -> bool:
+        """Add a finished charge's measured capacity, if it qualifies."""
+        sample = capacity_sample(charge)
+        if sample is None:
+            return False
+        samples = list(self.capacity_samples or [])
+        if samples and sample["at"] is not None and samples[-1].get("at") == sample["at"]:
+            return False
+        samples.append(sample)
+        self.capacity_samples = samples[-CAPACITY_AVERAGE_OF:]
+        return True
 
     async def async_load(self) -> None:
         from homeassistant.helpers.storage import Store
@@ -1624,6 +1690,12 @@ class TripStatsManager:
         self.activity_times = data.get("activity_times")
         self.saved_vehicle_data = data.get("saved_vehicle_data")
         self.range_after_charge = data.get("range_after_charge")
+        samples = data.get("capacity_samples")
+        self.capacity_samples = samples if isinstance(samples, list) else []
+        if not self.capacity_samples:
+            # First run with this sensor: start from the last charge, if it
+            # qualifies, rather than wait for the next one.
+            self.note_capacity_sample(self.last_charge)
 
     async def async_save(self) -> None:
         """Persist current open/last-trip state and the since-charge baseline."""
@@ -1684,6 +1756,7 @@ class TripStatsManager:
                 "activity_times": self.activity_times,
                 "saved_vehicle_data": self.saved_vehicle_data,
                 "range_after_charge": self.range_after_charge,
+                "capacity_samples": self.capacity_samples,
             }
         )
 
@@ -2064,6 +2137,7 @@ class TripStatsManager:
         if charge is None:
             return None, True
         self.last_charge = charge
+        self.note_capacity_sample(charge)
         return charge, True
 
     def note_charge_stopped(self, snapshot: "ChargeSnapshot | None") -> bool:
