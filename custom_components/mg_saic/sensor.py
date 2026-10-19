@@ -2643,6 +2643,29 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
         # See #238.
         return self.coordinator.last_update_success
 
+    def _range_after_charge_snapshot(self):
+        trip_stats = getattr(self.coordinator, "trip_stats", None)
+        return getattr(trip_stats, "range_after_charge", None) if trip_stats else None
+
+    def _range_after_charge_held(self):
+        """Estimated Range After Charging while unplugged, or None to follow the car.
+
+        Holds the figure from the last time the car was plugged in. With no
+        such figure yet (first install while unplugged), the car's current
+        one is taken once and held from then on.
+        """
+        self._range_held = False
+        plugged = getattr(self.coordinator, "range_after_charge_plugged_in", None)
+        if plugged is None or plugged() is not False:
+            return None
+        snapshot = self._range_after_charge_snapshot()
+        if not snapshot or snapshot.get("value_km") is None:
+            return None
+        self._range_held = True
+        self._last_source = snapshot.get("source")
+        self._last_valid_value = snapshot["value_km"]
+        return snapshot["value_km"]
+
     @property
     def extra_state_attributes(self):
         """Expose which source produced the value, for totalBatteryCapacity only.
@@ -2659,7 +2682,16 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
             # because the two were computed by unrelated code paths.
             if self.native_value is None:
                 return None
-            return {"source": self._last_source} if self._last_source else None
+            attrs = {"source": self._last_source} if self._last_source else {}
+            snapshot = self._range_after_charge_snapshot()
+            if snapshot:
+                attrs["basis"] = (
+                    "last_charge" if getattr(self, "_range_held", False) else "plugged_in"
+                )
+                for key in ("electric_range_km", "soc_pct", "target_soc_pct", "as_of"):
+                    if snapshot.get(key) is not None:
+                        attrs[key] = snapshot[key]
+            return attrs or None
         if self._field != "totalBatteryCapacity":
             return None
         # Reported, not inferred. This used to guess "profile" from
@@ -2710,6 +2742,11 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
                 # is actually the projection must never be labelled
                 # "reported" — so both are decided together and cached.
                 if self._field == "imcuChrgngEstdElecRng":
+                    # Between charges: the figure from the last time the car
+                    # was plugged in, not the car's running recalculation.
+                    held = self._range_after_charge_held()
+                    if held is not None:
+                        return held
                     value, source = None, None
                     if not self._is_invalidated(charging_data):
                         reported = getattr(charging_data, self._field, None)
@@ -2722,6 +2759,9 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
                     self._last_source = source
                     if value is not None:
                         self._last_valid_value = value
+                        note = getattr(self.coordinator, "note_range_after_charge", None)
+                        if note is not None:
+                            note(value, source)
                         return value
                     # Neither source has anything fresh this poll. Hold the
                     # last good figure and say so, rather than blink to

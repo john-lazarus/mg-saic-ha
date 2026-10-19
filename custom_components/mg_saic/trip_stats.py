@@ -1565,6 +1565,10 @@ class TripStatsManager:
         # doesn't answer -- see saved_data.py. Keys: status, charging,
         # saved_at.
         self.saved_vehicle_data: dict[str, Any] | None = None
+        # Estimated Range After Charging as it stood the last time the car
+        # was plugged in, shown between charges. Keys: value_km, source,
+        # electric_range_km, soc_pct, target_soc_pct, as_of.
+        self.range_after_charge: dict[str, Any] | None = None
 
     async def async_load(self) -> None:
         from homeassistant.helpers.storage import Store
@@ -1619,6 +1623,7 @@ class TripStatsManager:
         self.counter_reset_guard = data.get("counter_reset_guard")
         self.activity_times = data.get("activity_times")
         self.saved_vehicle_data = data.get("saved_vehicle_data")
+        self.range_after_charge = data.get("range_after_charge")
 
     async def async_save(self) -> None:
         """Persist current open/last-trip state and the since-charge baseline."""
@@ -1678,6 +1683,7 @@ class TripStatsManager:
                 "counter_reset_guard": self.counter_reset_guard,
                 "activity_times": self.activity_times,
                 "saved_vehicle_data": self.saved_vehicle_data,
+                "range_after_charge": self.range_after_charge,
             }
         )
 
