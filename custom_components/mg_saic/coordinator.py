@@ -95,6 +95,8 @@ from .const import (
     DEFAULT_AC_LONG_INTERVAL,
     CONF_HOLIDAY_UPDATE_INTERVAL,
     CONF_STALE_DATA_THRESHOLD,
+    CONF_NEGATIVE_CHARGING_SWITCH,
+    CONF_NEGATIVE_CHARGING_VALUES,
     CONF_BATTERY_CAPACITY_OVERRIDE,
     CONF_FUEL_TANK_OVERRIDE,
     parse_capacity_override,
@@ -649,6 +651,15 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         self.enable_shutdown_refresh_sequence = config_entry.options.get(
             "enable_shutdown_refresh_sequence", True
         )
+        # Negative Charging Values (#442): the option adds the switch, the
+        # switch shows negative Charging Power / Current even while the
+        # status says charging. Both off by default.
+        self.negative_charging_switch = bool(
+            config_entry.options.get(CONF_NEGATIVE_CHARGING_SWITCH, False)
+        )
+        self.negative_charging_values = bool(
+            config_entry.options.get(CONF_NEGATIVE_CHARGING_VALUES, False)
+        )
 
     # ── Account-level lock injection ─────────────────────────────────────────
 
@@ -974,6 +985,12 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         )
         self.enable_shutdown_refresh_sequence = options.get(
             "enable_shutdown_refresh_sequence", self.enable_shutdown_refresh_sequence
+        )
+        self.negative_charging_switch = bool(
+            options.get(CONF_NEGATIVE_CHARGING_SWITCH, False)
+        )
+        self.negative_charging_values = bool(
+            options.get(CONF_NEGATIVE_CHARGING_VALUES, False)
         )
         self.holiday_mode = options.get("holiday_mode", self.holiday_mode)
         self.holiday_update_interval = get_interval_hours(
@@ -2213,6 +2230,53 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         mapped = TARGET_SOC_PERCENT_BY_CODE.get(code)
         return mapped if mapped is not None else 100.0
 
+    def range_after_charge_plugged_in(self):
+        """Whether Estimated Range After Charging should follow the car now.
+
+        True while the cable is in (see _cable_state), and when there is no
+        charging frame to tell, so a drop-out doesn't freeze it mid-charge.
+        """
+        frame = (self.data or {}).get("charging")
+        if frame is None:
+            return None
+        return self._cable_state(frame)[0]
+
+    def note_range_after_charge(self, value_km, source, *, india_origin=None):
+        """Keep the figure shown while plugged in, for between charges.
+
+        Between charges the car keeps recalculating it from the range per 1%
+        of battery and the target SOC, so it moved with every drive and every
+        target change (an MGS6: 508 km on the drive, 377 km the next day, all
+        from the target going 100% -> 80% and a long cold drive; an IM6
+        wobbling 520-591 km through a day's driving). It now holds what it
+        was when last plugged in, with what it was made of.
+        """
+        trip_stats = getattr(self, "trip_stats", None)
+        if trip_stats is None or value_km is None:
+            return
+        data = self.data or {}
+        status = data.get("status")
+        basic = getattr(status, "basicVehicleStatus", None) if status else None
+        frame = data.get("charging")
+        snapshot = {
+            "value_km": round(float(value_km), 1),
+            "source": source,
+            "electric_range_km": electric_range_km(
+                basic, frame, factor=DATA_DECIMAL_CORRECTION
+            ),
+            "soc_pct": self._extract_soc_pct(basic, frame),
+            "target_soc_pct": self._target_soc_pct(frame),
+        }
+        if is_india_backend(getattr(self, "client", None)) and india_origin is not None:
+            snapshot["india_provenance"] = compact_india_origin(india_origin)
+            snapshot["measurement_time"] = india_origin.get("measurement_time")
+        held = trip_stats.range_after_charge or {}
+        if {k: held.get(k) for k in snapshot} == snapshot:
+            return
+        snapshot["as_of"] = datetime.now(timezone.utc).isoformat()
+        trip_stats.range_after_charge = snapshot
+        self._schedule_trip_save()
+
     def projected_range_after_charging_km(self):
         """Our own estimate of the range at the end of this charge, or None.
 
@@ -3004,6 +3068,16 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         try:
             for delay in POST_SHUTDOWN_REFRESH_SEQUENCE:
                 await asyncio.sleep(delay)
+                # Not during quiet charging: these are live polls, and quiet
+                # charging is already watching the stored status for a plug-in.
+                # A car switched off at 18:50 with quiet charging from 19:00
+                # had its 19:06 and 19:16 checks reach the car mid-charge (#269).
+                if self.quiet_active and not self.is_powered_on:
+                    LOGGER.info(
+                        "Quiet charging: post-shutdown refreshes stopped for VIN %s",
+                        self.vin,
+                    )
+                    break
                 LOGGER.info(
                     "Post-shutdown refresh for VIN %s (delay was %ds)",
                     self.vin,
@@ -3847,6 +3921,39 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             remaining if remaining is not None else "an unknown time",
             delay,
         )
+
+    @property
+    def allow_negative_charging_power(self) -> bool:
+        """Show negative Charging Power / Current under a charging status (#442).
+
+        Only while the Negative Charging Values switch exists (the option is
+        ticked) and is on.
+        """
+        return bool(
+            getattr(self, "negative_charging_switch", False)
+            and getattr(self, "negative_charging_values", False)
+        )
+
+    async def async_set_negative_charging_values(self, enabled: bool) -> None:
+        """Turn Negative Charging Values on/off and persist it (#442).
+
+        Kept in the options like Holiday Mode, so it survives a restart. Only
+        the sensors' display changes; nothing is sent to the car.
+        """
+        self.negative_charging_values = enabled
+        new_options = {
+            **self.config_entry.options,
+            CONF_NEGATIVE_CHARGING_VALUES: enabled,
+        }
+        self.hass.config_entries.async_update_entry(
+            self.config_entry, options=new_options
+        )
+        LOGGER.info(
+            "Negative Charging Values %s for VIN %s",
+            "on" if enabled else "off",
+            getattr(self, "vin", "?"),
+        )
+        self.async_update_listeners()
 
     async def async_set_holiday_mode(self, enabled: bool) -> None:
         """Turn holiday mode on/off and persist it.

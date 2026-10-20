@@ -82,6 +82,17 @@ Its companion, **Charging Data Last Updated**, is a timestamp of the same `last_
  
 Use it to gate charging automations — for example, only act on Charging Power or Charging Status when Charging Data Freshness is `live`, so an automation never fires on a held value from before an outage.
 
+#### Is the Charging Power or Current value current?
+
+Charging Data Freshness covers the charging reply as a whole. The car can also send a good reply with one figure marked as "no value", and then **Charging Power** and **Charging Current** keep showing the last good figure while Charging Data Freshness still reads `live`. So both sensors carry two attributes of their own *(from 1.4.0-beta17, #442)*:
+
+| Attribute | Meaning |
+|---|---|
+| `held` | `true` when the value shown was kept from an earlier reading: the figure was "no value" this time, or the charging reply didn't come back. `false` when it was read on the latest poll |
+| `reading_time` | When the value shown was actually read from the car |
+
+To act only on a fresh reading, check `held` is `false`, for example `{{ not state_attr('sensor.mg_mg4_charging_power', 'held') }}`. A reply kept from earlier, like the saved one shown at startup while the car isn't answering, counts as held too.
+
 **The charging controls during an outage** *(from 1.4.0-beta5)*: the car can stop answering the charging request for hours while everything else works — and the iSmart app's charging page fails the same way (#419: 21 hours on an MG4). The controls stay usable instead of going unavailable:
 
 - **Target SOC**, **Charging Current Limit**, **Scheduled Charging Mode**, **Start** and **End** show the last values the car gave. The car still accepts the commands, so you can still change them.
@@ -160,9 +171,10 @@ The car never tells SAIC when it starts charging, and on an MG HS PHEV every liv
 **What still reaches the car:**
 - A car switched on during the quiet time is polled as normal.
 - **Update Vehicle Data** and any command you send.
-- The checks after you switch the car off.
 
-If one of those finds the car charging, the "has it finished?" check is set up from it, just as for quiet charging's own poll *(from 1.4.0-beta4)*. So an automation that presses **Update Vehicle Data** when your charger starts charging gives you the charge-start poll straight away, and quiet charging takes it from there.
+**The checks after you switch the car off** *(from 1.4.0-beta15)*: switching the car off normally sets off a few extra live polls over the next 25 minutes, to spot you plugging in. While Quiet Charging is on they stop, including ones left over from switching off just before the start time. Quiet Charging is already watching the stored status for a plug-in, so nothing is missed. Up to 1.4.0-beta14 they carried on, and on an MG HS PHEV switched off at 18:50 with Quiet Charging from 19:00, two of them reached the car mid-charge at 19:06 and 19:16 (#269).
+
+If **Update Vehicle Data** or a command finds the car charging, the "has it finished?" check is set up from it, just as for quiet charging's own poll *(from 1.4.0-beta4)*. So an automation that presses **Update Vehicle Data** when your charger starts charging gives you the charge-start poll straight away, and quiet charging takes it from there.
 
 **Worth knowing:**
 - The stored status updates itself at the start of a charge on an MGS6 and an MG HS PHEV. Other models are still to be confirmed; a model that doesn't simply won't show a charge until the end time.

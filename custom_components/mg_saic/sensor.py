@@ -39,6 +39,7 @@ from .const import (
     DATA_100_DECIMAL_CORRECTION,
 )
 from .logic import (
+    CHARGING_DATA_FRESHNESS_LIVE,
     CHARGING_DATA_FRESHNESS_STATES,
     india_measurement, india_measurements, india_field_provenance, india_not_older, ENERGY_CORRECTION_FIELDS,
     apply_energy_correction,
@@ -52,7 +53,63 @@ from .trip_stats import (
     compute_driving_since_charge,
     compute_since_charge_efficiency,
     compute_soc_since_reset_efficiency,
+    measured_capacity,
 )
+
+
+def _negative_charging_allowed(coordinator):
+    """The owner wants negative Charging Power / Current shown as reported (#442)."""
+    return getattr(coordinator, "allow_negative_charging_power", False) is True
+
+
+def _note_charging_reading(sensor):
+    """Whether Charging Power / Current is showing this poll's reading (#442).
+
+    ``sensor._kind`` says where the value just returned came from:
+
+    - ``fresh``: worked out from the charging reply. Counts as read only when
+      Charging Data Freshness is live, so a reply kept from earlier (the saved
+      one shown at startup, say) is not taken for a new reading.
+    - ``status``: 0 because the car's status says it isn't charging while
+      the charging reply is missing; read at that poll.
+    - ``held``: the last value, kept because the figure was the car's "no
+      value" (-128) or the charging reply didn't come back.
+    - ``none``: nothing to show.
+    """
+    kind = getattr(sensor, "_kind", None)
+    freshness = getattr(sensor.coordinator, "charging_freshness", None)
+    state = getattr(freshness, "state", None) if freshness is not None else None
+    if kind == "fresh" and freshness is not None and state != CHARGING_DATA_FRESHNESS_LIVE:
+        kind = "held"
+    india = is_india_backend(getattr(sensor.coordinator, "client", None))
+    if india and kind in ("fresh", "status") and getattr(sensor, "_india_measurement_time", None) is None:
+        kind = "held"
+    if kind == "fresh":
+        sensor._held = False
+        sensor._reading_time = getattr(freshness, "last_success", None)
+    elif kind == "status":
+        sensor._held = False
+        sensor._reading_time = getattr(freshness, "last_attempt", None)
+    elif kind == "held":
+        sensor._held = True
+    else:
+        sensor._held = None
+    if india:
+        sensor._kind = kind
+        if kind in ("fresh", "status"):
+            sensor._reading_time = datetime.fromtimestamp(sensor._india_measurement_time, timezone.utc)
+
+
+def _charging_reading_attributes(sensor):
+    """``held`` / ``reading_time`` for Charging Power and Current (#442)."""
+    held = getattr(sensor, "_held", None)
+    if held is None:
+        return None
+    reading_time = getattr(sensor, "_reading_time", None)
+    return {
+        "held": held,
+        "reading_time": reading_time.isoformat() if reading_time else None,
+    }
 
 
 def _stopped_per_status(coordinator):
@@ -811,6 +868,9 @@ async def async_setup_entry(hass, entry, async_add_entities):
                 # across the session, since the API only reports energy taken
                 # back out afterwards.
                 sensors.append(SAICMGLastChargeEnergySensor(coordinator, entry))
+                # The battery's usable capacity, measured from big charges and
+                # averaged, to watch for battery fade.
+                sensors.append(SAICMGMeasuredBatteryCapacitySensor(coordinator, entry))
                 # How much energy is in the battery right now (kWh).
                 sensors.append(SAICMGBatteryEnergySensor(coordinator, entry))
                 sensors.append(SAICMGLastChargeRangeSensor(coordinator, entry))
@@ -2223,6 +2283,11 @@ class SAICMGChargingCurrentSensor(CoordinatorEntity, SensorEntity):
         # Last value this sensor displayed from a live poll (including the
         # explicit "not charging -> 0"), held across charging-data drop-outs.
         self._last_valid_current: float | None = None
+        # Whether the value shown is this poll's reading, and when it was
+        # read (#442): see _note_charging_reading.
+        self._kind = None
+        self._held = None
+        self._reading_time = None
 
     @property
     def unique_id(self):
@@ -2248,9 +2313,19 @@ class SAICMGChargingCurrentSensor(CoordinatorEntity, SensorEntity):
     @property
     def native_value(self):
         """Return the state of the sensor."""
+        value = self._current_value()
+        _note_charging_reading(self)
+        return value
+
+    def _current_value(self):
+        self._kind = "none"
         if is_india_backend(getattr(self.coordinator, "client", None)):
             origin = _india_charging_origin(self)
-            if not india_not_older(origin, getattr(self, "_india_origin", None)):
+            retained = getattr(self, "_india_origin", None)
+            if (not india_not_older(origin, retained)
+                    or (retained is not None and retained.get("measurement_time") is not None
+                        and origin.get("measurement_time") == retained["measurement_time"])):
+                self._kind = "held" if self._last_valid_current is not None else "none"
                 return self._last_valid_current
         try:
             charging_data = getattr(
@@ -2268,6 +2343,7 @@ class SAICMGChargingCurrentSensor(CoordinatorEntity, SensorEntity):
                     if is_india_backend(getattr(self.coordinator, "client", None)):
                         self._india_origin = _india_charging_origin(self)
                         self._india_measurement_time = self._india_origin.get("measurement_time")
+                    self._kind = "fresh"
                     return 0
 
                 raw_value = getattr(charging_data, self._field, None)
@@ -2281,6 +2357,7 @@ class SAICMGChargingCurrentSensor(CoordinatorEntity, SensorEntity):
                             self._name,
                             self._last_valid_current,
                         )
+                        self._kind = "held"
                         return self._last_valid_current
                     return None
 
@@ -2297,13 +2374,21 @@ class SAICMGChargingCurrentSensor(CoordinatorEntity, SensorEntity):
                     # measurement noise — clamp to 0 rather than show negative.
                     # V2X discharge (status 13) is intentionally excluded so
                     # genuine negative discharge current is preserved.
-                    if calculated_value < 0 and charging_status in {1, 2, 3, 9, 10, 12}:
+                    # Unless the owner has asked for negatives (#442): an MG4
+                    # discharging 15-18 A through a two-way DC charger reports
+                    # "Charging (DC)" (10) the whole time, not 13.
+                    if (
+                        calculated_value < 0
+                        and charging_status in {1, 2, 3, 9, 10, 12}
+                        and not _negative_charging_allowed(self.coordinator)
+                    ):
                         calculated_value = 0.0
 
                     self._last_valid_current = calculated_value
                     if is_india_backend(getattr(self.coordinator, "client", None)):
                         self._india_origin = _india_charging_origin(self)
                         self._india_measurement_time = self._india_origin.get("measurement_time")
+                    self._kind = "fresh"
                     return calculated_value
                 else:
                     return None
@@ -2312,6 +2397,7 @@ class SAICMGChargingCurrentSensor(CoordinatorEntity, SensorEntity):
                 if is_india_backend(getattr(self.coordinator, "client", None)):
                     self._india_origin = _india_charging_origin(self)
                     self._india_measurement_time = self._india_origin.get("measurement_time")
+                self._kind = "status"
                 return 0
             else:
                 LOGGER.debug("No charging data available for %s", self._name)
@@ -2332,6 +2418,7 @@ class SAICMGChargingCurrentSensor(CoordinatorEntity, SensorEntity):
                 self._name,
                 self._last_valid_current,
             )
+            self._kind = "held"
             return self._last_valid_current
         return None
 
@@ -2342,9 +2429,10 @@ class SAICMGChargingCurrentSensor(CoordinatorEntity, SensorEntity):
 
     @property
     def extra_state_attributes(self):
+        attrs = _charging_reading_attributes(self)
         if is_india_backend(getattr(self.coordinator, "client", None)):
-            return _india_state_attributes(self)
-        return super().extra_state_attributes
+            return {**(attrs or {}), **_india_state_attributes(self)}
+        return attrs
 
 
 class SAICMGChargingPowerSensor(CoordinatorEntity, SensorEntity):
@@ -2389,6 +2477,11 @@ class SAICMGChargingPowerSensor(CoordinatorEntity, SensorEntity):
         # Last value this sensor displayed from a live poll (including the
         # explicit "not charging -> 0"), held across charging-data drop-outs.
         self._last_valid_power: float | None = None
+        # Whether the value shown is this poll's reading, and when it was
+        # read (#442): see _note_charging_reading.
+        self._kind = None
+        self._held = None
+        self._reading_time = None
 
     @property
     def unique_id(self):
@@ -2414,9 +2507,19 @@ class SAICMGChargingPowerSensor(CoordinatorEntity, SensorEntity):
     @property
     def native_value(self):
         """Return the state of the sensor."""
+        value = self._power_value()
+        _note_charging_reading(self)
+        return value
+
+    def _power_value(self):
+        self._kind = "none"
         if is_india_backend(getattr(self.coordinator, "client", None)):
             origin = _india_charging_origin(self)
-            if not india_not_older(origin, getattr(self, "_india_origin", None)):
+            retained = getattr(self, "_india_origin", None)
+            if (not india_not_older(origin, retained)
+                    or (retained is not None and retained.get("measurement_time") is not None
+                        and origin.get("measurement_time") == retained["measurement_time"])):
+                self._kind = "held" if self._last_valid_power is not None else "none"
                 return self._last_valid_power
         try:
             charging_data = getattr(
@@ -2433,6 +2536,7 @@ class SAICMGChargingPowerSensor(CoordinatorEntity, SensorEntity):
                     if is_india_backend(getattr(self.coordinator, "client", None)):
                         self._india_origin = _india_charging_origin(self)
                         self._india_measurement_time = self._india_origin.get("measurement_time")
+                    self._kind = "fresh"
                     return 0
 
                 raw_current = getattr(charging_data, "bmsPackCrnt", None)
@@ -2447,6 +2551,7 @@ class SAICMGChargingPowerSensor(CoordinatorEntity, SensorEntity):
                             self._name,
                             self._last_valid_power,
                         )
+                        self._kind = "held"
                         return self._last_valid_power
                     return None
 
@@ -2462,13 +2567,19 @@ class SAICMGChargingPowerSensor(CoordinatorEntity, SensorEntity):
                     # bmsPackCrnt oscillates around 20000 and can produce small
                     # negative power values. Clamp to 0.
                     # V2X discharge (status 13) excluded — negative power is correct.
-                    if power < 0 and charging_status in {1, 2, 3, 9, 10, 12}:
+                    # Unless the owner has asked for negatives (#442).
+                    if (
+                        power < 0
+                        and charging_status in {1, 2, 3, 9, 10, 12}
+                        and not _negative_charging_allowed(self.coordinator)
+                    ):
                         power = 0.0
 
                     self._last_valid_power = power
                     if is_india_backend(getattr(self.coordinator, "client", None)):
                         self._india_origin = _india_charging_origin(self)
                         self._india_measurement_time = self._india_origin.get("measurement_time")
+                    self._kind = "fresh"
                     return power
                 else:
                     return None
@@ -2477,6 +2588,7 @@ class SAICMGChargingPowerSensor(CoordinatorEntity, SensorEntity):
                 if is_india_backend(getattr(self.coordinator, "client", None)):
                     self._india_origin = _india_charging_origin(self)
                     self._india_measurement_time = self._india_origin.get("measurement_time")
+                self._kind = "status"
                 return 0
             else:
                 LOGGER.debug("No charging data available for %s", self._name)
@@ -2492,6 +2604,7 @@ class SAICMGChargingPowerSensor(CoordinatorEntity, SensorEntity):
                 self._name,
                 self._last_valid_power,
             )
+            self._kind = "held"
             return self._last_valid_power
         return None
 
@@ -2502,9 +2615,10 @@ class SAICMGChargingPowerSensor(CoordinatorEntity, SensorEntity):
 
     @property
     def extra_state_attributes(self):
+        attrs = _charging_reading_attributes(self)
         if is_india_backend(getattr(self.coordinator, "client", None)):
-            return _india_state_attributes(self)
-        return super().extra_state_attributes
+            return {**(attrs or {}), **_india_state_attributes(self)}
+        return attrs
 
 
 class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
@@ -2663,6 +2777,39 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
         # See #238.
         return self.coordinator.last_update_success
 
+    def _range_after_charge_snapshot(self):
+        trip_stats = getattr(self.coordinator, "trip_stats", None)
+        return getattr(trip_stats, "range_after_charge", None) if trip_stats else None
+
+    def _range_after_charge_held(self):
+        """Estimated Range After Charging while unplugged, or None to follow the car.
+
+        Holds the figure from the last time the car was plugged in. With no
+        such figure yet (first install while unplugged), the car's current
+        one is taken once and held from then on.
+        """
+        self._range_held = (
+            is_india_backend(getattr(self.coordinator, "client", None))
+            and self.coordinator.data.get("charging") is None
+        )
+        snapshot = self._range_after_charge_snapshot()
+        if (is_india_backend(getattr(self.coordinator, "client", None))
+                and snapshot and not getattr(self, "_india_origin", None)):
+            self._india_origin = snapshot.get("india_provenance")
+            self._india_measurement_time = snapshot.get("measurement_time")
+            self._last_valid_value = snapshot.get("value_km")
+            self._last_source = snapshot.get("source")
+        plugged = getattr(self.coordinator, "range_after_charge_plugged_in", None)
+        if plugged is None or plugged() is not False:
+            return None
+        snapshot = self._range_after_charge_snapshot()
+        if not snapshot or snapshot.get("value_km") is None:
+            return None
+        self._range_held = True
+        self._last_source = snapshot.get("source")
+        self._last_valid_value = snapshot["value_km"]
+        return snapshot["value_km"]
+
     @property
     def extra_state_attributes(self):
         """Expose which source produced the value, for totalBatteryCapacity only.
@@ -2671,13 +2818,12 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
         per-model correction, or the raw (sometimes wrong) API value was in
         effect — this makes it visible on the sensor, and templatable.
         """
-        if is_india_backend(getattr(self.coordinator, "client", None)):
+        india = is_india_backend(getattr(self.coordinator, "client", None))
+        if india and self._field != "imcuChrgngEstdElecRng":
             _ = self.native_value
             attrs = _india_state_attributes(self)
             if self._field == "totalBatteryCapacity":
                 attrs["capacity_source"] = (attrs["india_provenance"] or {}).get("resolution")
-            elif self._field == "imcuChrgngEstdElecRng":
-                attrs["source"] = self._last_source
             return attrs
         if self._field == "imcuChrgngEstdElecRng":
             # Reads the value alongside its decision (native_value sets both
@@ -2687,7 +2833,18 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
             # because the two were computed by unrelated code paths.
             if self.native_value is None:
                 return None
-            return {"source": self._last_source} if self._last_source else None
+            attrs = {"source": self._last_source} if self._last_source else {}
+            if india:
+                attrs.update(_india_state_attributes(self))
+            snapshot = self._range_after_charge_snapshot()
+            if snapshot:
+                attrs["basis"] = (
+                    "last_charge" if getattr(self, "_range_held", False) else "plugged_in"
+                )
+                for key in ("electric_range_km", "soc_pct", "target_soc_pct", "as_of"):
+                    if snapshot.get(key) is not None:
+                        attrs[key] = snapshot[key]
+            return attrs or None
         if self._field != "totalBatteryCapacity":
             return None
         # Reported, not inferred. This used to guess "profile" from
@@ -2732,6 +2889,12 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
                 self.coordinator.data.get("charging"), self._data_source, None
             )
 
+            if self._field == "imcuChrgngEstdElecRng" and (charging_data or india):
+                # Restore retained range even when no new charging frame arrives.
+                held = self._range_after_charge_held()
+                if held is not None:
+                    return held
+
             if charging_data:
                 charging_status = getattr(charging_data, "bmsChrgSts", None)
 
@@ -2771,10 +2934,14 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
                             old_inputs = retained.get("inputs", {})
                             if any(not india_not_older(item, old_inputs.get(field, retained)) for field, item in origin["inputs"].items()):
                                 return self._last_valid_value
+                            if retained and all(item.get("measurement_time") == old_inputs.get(field, retained).get("measurement_time") for field, item in origin["inputs"].items()):
+                                return self._last_valid_value
                         else:
                             retained = getattr(self, "_india_origin", None) or {}
                             prior_inputs = tuple(retained.get("inputs", {}).values()) or (retained,)
                             if any(not india_not_older(origin, previous) for previous in prior_inputs):
+                                return self._last_valid_value
+                            if retained and all(origin.get("measurement_time") == previous.get("measurement_time") for previous in prior_inputs):
                                 return self._last_valid_value
                     self._last_source = source
                     if value is not None:
@@ -2782,6 +2949,12 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
                         if is_india_backend(getattr(self.coordinator, "client", None)):
                             self._india_origin = origin
                             self._india_measurement_time = self._india_origin.get("measurement_time")
+                        note = getattr(self.coordinator, "note_range_after_charge", None)
+                        if note is not None:
+                            if india:
+                                note(value, source, india_origin=origin)
+                            else:
+                                note(value, source)
                         return value
                     # Neither source has anything fresh this poll. Hold the
                     # last good figure and say so, rather than blink to
@@ -4179,6 +4352,79 @@ class SAICMGBatteryEnergySensor(CoordinatorEntity, SensorEntity):
                             "capacity_kwh": self.coordinator._india_capacity_provenance(charging)}}
                 if self._source == "estimated" else india_field_provenance(rcs, "packEnergyKwh")
             )
+        return attrs
+
+
+class SAICMGMeasuredBatteryCapacitySensor(CoordinatorEntity, SensorEntity):
+    """Battery Capacity (Measured Over Time).
+
+    The battery's usable capacity worked out from the integration's own
+    measurements: on each big charge (30%+ added), the energy measured going
+    into the pack divided by the % added -- 25 kWh for 33% is 75.8 kWh. The
+    state is the average of the last five such charges. Unlike Estimated
+    Range After Charging it doesn't depend on driving, weather or the target
+    SOC, so its trend over months is a fair view of battery fade (asked for by
+    an IM6 owner wanting evidence for MG). Measured at the battery, so a bit
+    below the nominal pack size.
+    """
+
+    def __init__(self, coordinator, entry):
+        super().__init__(coordinator)
+        self._name = "Battery Capacity (Measured Over Time)"
+        self._attr_icon = "mdi:battery-heart-variant"
+        self._attr_device_class = SensorDeviceClass.ENERGY_STORAGE
+        self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+        self._attr_state_class = "measurement"
+        vin_info = coordinator.vin_info
+        self._unique_id = f"{entry.entry_id}_{vin_info.vin}_battery_capacity_measured"
+        self._device_info = create_device_info(coordinator, entry.entry_id)
+
+    @property
+    def unique_id(self):
+        return self._unique_id
+
+    @property
+    def name(self):
+        vin_info = self.coordinator.vin_info
+        return f"{vin_info.brandName} {vin_info.modelName} {self._name}"
+
+    @property
+    def device_info(self):
+        return self._device_info
+
+    @property
+    def available(self):
+        # Unknown, not unavailable, until the first qualifying charge.
+        return True
+
+    def _samples(self):
+        stats = getattr(self.coordinator, "trip_stats", None)
+        return list(getattr(stats, "capacity_samples", None) or []) if stats else []
+
+    @property
+    def native_value(self):
+        return measured_capacity(self._samples())
+
+    @property
+    def extra_state_attributes(self):
+        samples = self._samples()
+        if not samples:
+            return None
+        latest = samples[-1]
+        attrs = {
+            "charges_in_average": len(samples),
+            "latest_charge_capacity_kWh": latest.get("capacity_kWh"),
+            "latest_charge_energy_kWh": latest.get("energy_kWh"),
+            "latest_charge_soc_added_pct": latest.get("soc_added_pct"),
+            "latest_charge_at": latest.get("at"),
+            "recent_charges_kWh": [s.get("capacity_kWh") for s in samples],
+        }
+        average = measured_capacity(samples)
+        usable = getattr(self.coordinator, "effective_battery_capacity_kwh", None)
+        if usable:
+            attrs["usable_capacity_kWh"] = usable
+            if average:
+                attrs["percent_of_usable"] = round(average / usable * 100.0, 1)
         return attrs
 
 
