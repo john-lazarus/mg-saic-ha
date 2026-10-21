@@ -19,7 +19,7 @@ The MG/SAIC Custom Integration provides the following sensors, binary sensors, a
 - Model
 - Model Year
 - VIN *(displayed masked, e.g. `LS**********46986`; the full VIN is available as the `vin_full` attribute for use in automations/services)*
-- Mileage
+- Mileage *(the odometer. On EVs and PHEVs it comes from the car's status, falling back to the charging data where the status figure is missing or stuck at 6,553.5 km. From 1.4.0-beta20 it no longer waits for charging data after a restart when the status has a good figure)*
 - Interior Temperature
 - Exterior Temperature
 - Ancillary Battery Voltage *(12V battery — on the MG4 EV Urban it is corrected, see [12V battery voltage](#12v-battery-voltage))*
