@@ -578,6 +578,45 @@ class ChargingFreshnessTracker:
         return attrs
 
 
+def format_outage(seconds):
+    """'2 h 7 min', '45 min', 'under a minute'."""
+    minutes = int(max(0, seconds) // 60)
+    if minutes < 1:
+        return "under a minute"
+    hours, minutes = divmod(minutes, 60)
+    if not hours:
+        return f"{minutes} min"
+    return f"{hours} h {minutes} min" if minutes else f"{hours} h"
+
+
+def charging_freshness_change(before_state, before_since, tracker, now, tz=None):
+    """The log message for a change in Charging Data Freshness, or None.
+
+    Nothing was logged when charging data went stale or came back, so an
+    outage only showed in the sensor's history (@HarryFlatter, #445: a
+    two-hour SAIC outage on 20 Oct 2026). One line when it goes, one when it
+    returns with how long it was gone; nothing while it stays the same.
+
+    :param before_state: the tracker's state before this outcome was recorded.
+    :param before_since: its ``stale_since`` before this outcome was recorded.
+    :param tz: time zone for the clock time in the message (HA's own).
+    """
+    after = tracker.state
+    if after == before_state:
+        return None
+    if after == CHARGING_DATA_FRESHNESS_LIVE:
+        if before_since is None:
+            return None  # first fetch after startup: nothing to report
+        return f"back after {format_outage((now - before_since).total_seconds())}"
+    reason = tracker.last_error or "no reason given"
+    if after == CHARGING_DATA_FRESHNESS_STALE:
+        held = tracker.last_success.astimezone(tz).strftime("%H:%M")
+        return f"not available ({reason}); charging sensors are holding the values from {held}"
+    if after == CHARGING_DATA_FRESHNESS_NO_DATA:
+        return f"not available yet ({reason}); charging sensors stay unknown until it arrives"
+    return None
+
+
 # ── Phantom since-charge counter resets (#262) ──────────────────────────────
 #
 # Some cars reset their own since-charge counters without a charge. Captured in

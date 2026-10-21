@@ -82,6 +82,15 @@ Its companion, **Charging Data Last Updated**, is a timestamp of the same `last_
  
 Use it to gate charging automations — for example, only act on Charging Power or Charging Status when Charging Data Freshness is `live`, so an automation never fires on a held value from before an outage.
 
+**In the log** *(from 1.4.0-beta20)*: one INFO line when charging data goes, and one when it comes back with how long it was gone, so an outage can be matched up with the rest of the log. Nothing more is logged while it stays the same:
+
+```
+Charging data for VIN …6986: not available (return code: 4, message: The remote control instruction failed, please try again later.); charging sensors are holding the values from 06:00
+Charging data for VIN …6986: back after 2 h 6 min
+```
+
+Charging data outages are usually on SAIC's side and hit many cars at once. The other sensors, including **Mileage** (the odometer), carry on from the car's status in the meantime.
+
 #### Is the Charging Power or Current value current?
 
 Charging Data Freshness covers the charging reply as a whole. The car can also send a good reply with one figure marked as "no value", and then **Charging Power** and **Charging Current** keep showing the last good figure while Charging Data Freshness still reads `live`. So both sensors carry two attributes of their own *(from 1.4.0-beta17, #442)*:

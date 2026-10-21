@@ -1,6 +1,6 @@
 # File: coordinator.py
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 import asyncio
 from contextlib import suppress
 from homeassistant.config_entries import ConfigEntryNotReady
@@ -22,6 +22,7 @@ from .backends import Feature
 from .backends import backend_supports as _backend_supports
 from .logic import (
     ChargingFreshnessTracker,
+    charging_freshness_change,
     command_rejection_advice,
     command_rejection_is_limit,
     SinceChargeCounterGuard,
@@ -1567,7 +1568,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 # it timed out after 20s every hour). Record it as a failed
                 # cycle so Charging Data Freshness shows stale, as it would.
                 data["charging"] = None
-                self.charging_freshness.record_failure(
+                self._record_charging_outcome(
                     datetime.now(timezone.utc), "Car not answering (asleep)"
                 )
                 self._charging_outcome_recorded = True
@@ -1637,10 +1638,10 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 # recorded error is a failure too.
                 now = datetime.now(timezone.utc)
                 if data["charging"] is not None:
-                    self.charging_freshness.record_success(now)
+                    self._record_charging_outcome(now)
                     self._apply_counter_reset_guard(data["charging"], now)
                 else:
-                    self.charging_freshness.record_failure(
+                    self._record_charging_outcome(
                         now, charging_error or "No response after retries"
                     )
                 self._charging_outcome_recorded = True
@@ -4106,7 +4107,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         """
         try:
             if self.charging_data_applies and not self._charging_outcome_recorded:
-                self.charging_freshness.record_failure(
+                self._record_charging_outcome(
                     datetime.now(timezone.utc), f"Update cycle failed: {err}"
                 )
         except Exception as bookkeeping_err:  # pragma: no cover - defensive
@@ -4115,6 +4116,32 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 getattr(self, "vin", None),
                 bookkeeping_err,
             )
+
+    def _record_charging_outcome(self, now, failure=None) -> None:
+        """Record a charging fetch outcome, logging when freshness changes.
+
+        ``failure`` is the reason when there was no charging data this cycle;
+        leave it out for a success. One INFO line when charging data goes and
+        one when it comes back, with how long it was gone (#445).
+        """
+        tracker = self.charging_freshness
+        before_state, before_since = tracker.state, tracker.stale_since
+        if failure is None:
+            tracker.record_success(now)
+        else:
+            tracker.record_failure(now, failure)
+        # Only a log line: never let it get in the way of the update.
+        try:
+            tz = getattr(local_now(), "tzinfo", None)
+            message = charging_freshness_change(
+                before_state, before_since, tracker, now,
+                tz=tz if isinstance(tz, tzinfo) else None,
+            )
+        except Exception as err:  # pragma: no cover - defensive
+            LOGGER.debug("Charging freshness log skipped: %s", err)
+            message = None
+        if message:
+            LOGGER.info("Charging data for VIN %s: %s", self.vin, message)
 
     @property
     def charging_data_freshness(self) -> str | None:
