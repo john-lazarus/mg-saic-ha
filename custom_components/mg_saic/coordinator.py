@@ -1,6 +1,6 @@
 # File: coordinator.py
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 import asyncio
 from contextlib import suppress
 from homeassistant.config_entries import ConfigEntryNotReady
@@ -23,6 +23,7 @@ from .backends import backend_supports as _backend_supports
 from .logic import (
     ChargingFreshnessTracker,
     india_measurement, india_measurements, india_field_provenance, india_not_older,
+    charging_freshness_change,
     command_rejection_advice,
     command_rejection_is_limit,
     SinceChargeCounterGuard,
@@ -1572,10 +1573,10 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 else:
                     raise
 
-            # Fetch charging info with retries.
+            # Read charging info, retrying independent network fetches only.
             # Same explicit-vin pattern as above.
             # Backend-gated: only fetched where the backend supports charging
-            # data at all (e.g. MG India's platform has none — issue #169).
+            # data at all.
             if self.charging_data_applies and self._gave_up_car_asleep:
                 # The car didn't answer the status request and is flagged
                 # unreachable: charging data comes from the same car, so asking
@@ -1583,7 +1584,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 # it timed out after 20s every hour). Record it as a failed
                 # cycle so Charging Data Freshness shows stale, as it would.
                 data["charging"] = None
-                self.charging_freshness.record_failure(
+                self._record_charging_outcome(
                     datetime.now(timezone.utc), "Car not answering (asleep)"
                 )
                 self._charging_outcome_recorded = True
@@ -1608,17 +1609,26 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 )
                 charging_error = None
                 try:
-                    if charging_timeout < STARTUP_CHARGING_MIN:
-                        # The status took most of the startup allowance.
-                        raise asyncio.TimeoutError
-                    data["charging"] = await asyncio.wait_for(
-                        self._fetch_with_retries(
-                            lambda: self.client.get_charging_info(vin),
-                            self._is_generic_response_charging,
-                            "charging info",
-                        ),
-                        timeout=charging_timeout,
-                    )
+                    if is_india_backend(self.client):
+                        # Status already polled: this consumes its cached frame
+                        # without network I/O, even if startup time is used up.
+                        data["charging"] = await self.client.get_charging_info(vin)
+                        if data["charging"] is None:
+                            charging_error = "No cached charging frame"
+                        elif self._is_generic_response_charging(data["charging"]):
+                            raise GenericResponseException("Generic charging info response.")
+                    else:
+                        if charging_timeout < STARTUP_CHARGING_MIN:
+                            # The status took most of the startup allowance.
+                            raise asyncio.TimeoutError
+                        data["charging"] = await asyncio.wait_for(
+                            self._fetch_with_retries(
+                                lambda: self.client.get_charging_info(vin),
+                                self._is_generic_response_charging,
+                                "charging info",
+                            ),
+                            timeout=charging_timeout,
+                        )
                 except asyncio.TimeoutError:
                     if charging_timeout < STARTUP_CHARGING_MIN:
                         LOGGER.info(
@@ -1658,12 +1668,12 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                         previous = getattr(self, "_india_charge_measurement_time", None)
                         if stamp is not None and (previous is None or stamp > previous):
                             measured = datetime.fromtimestamp(stamp, timezone.utc)
-                            self.charging_freshness.record_success(measured)
+                            self._record_charging_outcome(measured)
                             self.charging_freshness.last_attempt = now
                             self._india_charge_measurement_time = stamp
                             self._apply_counter_reset_guard(data["charging"], measured)
                         else:
-                            self.charging_freshness.record_failure(now, "No advancing India charge measurement time")
+                            self._record_charging_outcome(now, "No advancing India charge measurement time")
                             previous_rcs = getattr(self.last_charging_data, "rvsChargeStatus", None)
                             if previous_rcs is not None:
                                 rcs = data["charging"].rvsChargeStatus
@@ -1675,10 +1685,10 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                                         "held": True,
                                     }
                     else:
-                        self.charging_freshness.record_success(now)
+                        self._record_charging_outcome(now)
                         self._apply_counter_reset_guard(data["charging"], now)
                 else:
-                    self.charging_freshness.record_failure(
+                    self._record_charging_outcome(
                         now, charging_error or "No response after retries"
                     )
                 self._charging_outcome_recorded = True
@@ -4384,7 +4394,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         """
         try:
             if self.charging_data_applies and not self._charging_outcome_recorded:
-                self.charging_freshness.record_failure(
+                self._record_charging_outcome(
                     datetime.now(timezone.utc), f"Update cycle failed: {err}"
                 )
         except Exception as bookkeeping_err:  # pragma: no cover - defensive
@@ -4393,6 +4403,32 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 getattr(self, "vin", None),
                 bookkeeping_err,
             )
+
+    def _record_charging_outcome(self, now, failure=None) -> None:
+        """Record a charging fetch outcome, logging when freshness changes.
+
+        ``failure`` is the reason when there was no charging data this cycle;
+        leave it out for a success. One INFO line when charging data goes and
+        one when it comes back, with how long it was gone (#445).
+        """
+        tracker = self.charging_freshness
+        before_state, before_since = tracker.state, tracker.stale_since
+        if failure is None:
+            tracker.record_success(now)
+        else:
+            tracker.record_failure(now, failure)
+        # Only a log line: never let it get in the way of the update.
+        try:
+            tz = getattr(local_now(), "tzinfo", None)
+            message = charging_freshness_change(
+                before_state, before_since, tracker, now,
+                tz=tz if isinstance(tz, tzinfo) else None,
+            )
+        except Exception as err:  # pragma: no cover - defensive
+            LOGGER.debug("Charging freshness log skipped: %s", err)
+            message = None
+        if message:
+            LOGGER.info("Charging data for VIN %s: %s", self.vin, message)
 
     @property
     def charging_data_freshness(self) -> str | None:

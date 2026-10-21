@@ -174,3 +174,79 @@ polling or remote commands are not required for the offline procedure.
 Keep the PR open until this evidence is reviewed. A global beta smoke test
 before a release adds live evidence beyond the automated comparison recorded
 above.
+
+## Beta20 reconciliation — 22 October 2026 (IST)
+
+This reconciliation starts from PR #439 at
+`428b063957bd5d62f7a2b277d6231bd09a082de3` and incorporates beta20 plus the
+approved changes in #449 and #450:
+
+| Input | Commit |
+|---|---|
+| Upstream beta20 | `24a9e4d9e7cc0ea0ec063cfe004b4694e22217ef` |
+| #449: India charging duration | `323589c69f1d0b30c8a4d2eca8f92255c82b8528` |
+| #450: single India charging-cache read | `4f0c6fb36f036c42f06ec4636ee2751bdf58ec26` |
+
+At validation time, #449 and #450 were still open upstream. The comparison
+baseline is a local merge of those exact heads onto beta20, not a claim that
+they had been released. The reconciliation records the real PR heads as
+parents; local validation-only merge commits are not part of its ancestry.
+
+### Changes checked
+
+- Use beta20's general mileage availability and status-odometer fallback.
+  The redundant India-specific availability exception is removed.
+- Preserve elapsed charging seconds as in #449 and consume India's charging
+  cache once per update as in #450, including after the startup network budget
+  is exhausted. Global retry and timeout handling is unchanged.
+- Route India charging success, replay rejection, and missing-data outcomes
+  through beta20's `_record_charging_outcome` helper. Successful readings keep
+  their source measurement time; `last_attempt` retains the receipt time.
+- Add a real update-cycle regression for advancing measurement, replay, and
+  recovery. It checks timestamps, stale/recovery INFO transitions, one cache
+  read per cycle, and no retry sleeps.
+- Adapt #450's existing status fixture to include `basicVehicleStatus`, without
+  weakening its assertions. Update the older global-mileage test to beta20's
+  behavior: missing status mileage remains unavailable, while valid status
+  mileage works without charging data and stays retained after a failed poll.
+- Remove the fragile assertion that the coordinator has exactly four helper
+  call sites. Keep the guard against direct freshness-tracker writes; the new
+  behavioral regression covers the two additional India outcomes.
+
+### Results
+
+Runtime: Python 3.12.14. Installed clients: `mg-saic-client==0.9.6` and
+`mg-ismart-india-client==0.2.1`; `pyflakes==4.0.3`.
+
+| Check | Result |
+|---|---|
+| Full offline suite on the reconciled code | 1,314 tests passed, no skips |
+| Focused India missing-cache and freshness sequence | 2 tests passed |
+| Global differential comparison against beta20 + #449 + #450 | All four scenarios matched: sensors, storage, ABRP, polling |
+| Undefined-name gate | Passed; existing unused-import/variable warnings remain non-blocking |
+| Diff whitespace check | Passed |
+
+The first suite run exposed two outdated test expectations: beta20 now makes
+global mileage available from good status data, and India adds two freshness
+helper call sites. Only the test contracts described above changed to resolve
+those failures; the production reconciliation was unchanged between runs.
+
+### Reproduce against the exact baseline
+
+Use the isolated Python environment and manifest dependencies described above.
+The following baseline merges are local test setup only:
+
+```bash
+git worktree add --detach ../mg-saic-beta20-check 24a9e4d9e7cc0ea0ec063cfe004b4694e22217ef
+git -C ../mg-saic-beta20-check merge --no-ff --no-edit 323589c69f1d0b30c8a4d2eca8f92255c82b8528
+git -C ../mg-saic-beta20-check merge --no-ff --no-edit 4f0c6fb36f036c42f06ec4636ee2751bdf58ec26
+python -m unittest discover -s tests -p 'test_*.py'
+python tools/compare_global_telemetry.py --base ../mg-saic-beta20-check --candidate .
+git diff --check
+```
+
+These results still use synthetic input and substituted HA/I/O boundaries.
+No vehicle installation, live charge, trip, Home Assistant restart, or ABRP
+service validation was performed. Publishing an experimental beta to gather
+that evidence remains a proposal for the maintainer; this reconciliation does
+not waive the outstanding field-validation requirement or merge #439.

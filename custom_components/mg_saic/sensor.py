@@ -993,8 +993,18 @@ class SAICMGMileageSensor(CoordinatorEntity, SensorEntity):
         fetches it for BEV/PHEV), so availability must not depend on it.
         Mileage for HEV comes from basicVehicleStatus which is always present.
 
-        India also provides the odometer through ordinary status, independently
-        of its charging endpoint. Missing charging data must not block mileage.
+        Likewise, some backends (e.g. India) never fetch charging data at all
+        because they have no charging endpoint (INDIA_FEATURES omits
+        CHARGING_DATA). For those, a BEV/PHEV must not require charging data
+        either — the odometer comes from basicVehicleStatus, so requiring
+        charging would leave the sensor permanently unavailable (#283).
+
+        A BEV/PHEV whose status carries a good odometer doesn't need charging
+        data either. Charging data was required before any value was held,
+        so a restart during a charging-data outage (SAIC, 20 Oct 2026) left
+        the sensor unavailable until charging data came back, even with the
+        odometer sitting in the status. Charging data is still needed where
+        the status odometer is missing or stuck at 6553.5 km (#280).
         """
         if self._last_valid_mileage is not None:
             return True
@@ -1016,12 +1026,27 @@ class SAICMGMileageSensor(CoordinatorEntity, SensorEntity):
                 self.coordinator.last_update_success
                 and self.coordinator.data.get("status") is not None
             )
-            # India mileage does not depend on the separate charging endpoint.
-            if is_india_backend(getattr(self.coordinator, "client", None)) or not self.coordinator.backend_supports(Feature.CHARGING_DATA):
+            # Only require charging data when the backend actually provides a
+            # charging endpoint. Backends without one (India) deliver the
+            # odometer via status alone, so gating on charging would deadlock
+            # the sensor into permanent unavailability (#283).
+            if not self.coordinator.backend_supports(Feature.CHARGING_DATA):
                 return base_available
-            return base_available and self.coordinator.data.get("charging") is not None
+            return base_available and (
+                self.coordinator.data.get("charging") is not None
+                or self._status_mileage() is not None
+            )
         else:
             return False
+
+    def _status_mileage(self):
+        """The odometer from the vehicle status, or None if it isn't usable."""
+        data = self.coordinator.data.get("status")
+        status_data = getattr(data, self._status_type, None) if data else None
+        mileage = getattr(status_data, self._field, None) if status_data else None
+        if mileage is None or mileage <= 0 or mileage == MILEAGE_UINT16_SATURATION:
+            return None
+        return mileage * self._factor
 
     @property
     def native_value(self):

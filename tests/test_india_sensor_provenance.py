@@ -98,14 +98,14 @@ class IndiaSensorProvenanceTests(unittest.TestCase):
                 self.assertIsNone(sensor.native_value)
                 self.assertIsNone(sensor._last_valid_mileage)
 
-    def test_global_bev_mileage_still_requires_charging_before_retention(self):
+    def test_global_bev_mileage_uses_valid_status_before_retention(self):
         for marker in (False, "true", None):
             with self.subTest(marker=marker):
                 backend = NS(_india_backend=marker, supported_features=BACKENDS.GLOBAL_FEATURES)
-                status = NS(basicVehicleStatus=NS(mileage=12345))
+                status = NS(basicVehicleStatus=NS(mileage=None))
                 sensor = _mileage_sensor(backend, "BEV", status)
                 self.assertFalse(sensor.available)
-                sensor.coordinator.data["charging"] = NS()
+                status.basicVehicleStatus.mileage = 12345
                 self.assertTrue(sensor.available)
                 self.assertEqual(sensor.native_value, 1234.5)
                 sensor.coordinator.last_update_success = False
