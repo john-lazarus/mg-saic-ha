@@ -115,13 +115,13 @@ class AbrpDispatchTests(unittest.IsolatedAsyncioTestCase):
     async def test_india_retries_only_failed_source_across_coordinator_cycles(self):
         coordinator = _coordinator(india=True)
         data = _india_data()
-        http = _Http([200, 503, 200])
+        http = _Http([503, 200, 200])
         with patch.object(COORDINATOR, "async_get_clientsession", return_value=http):
             # The ordinary status can be cached while another India source advances.
             await coordinator._maybe_send_abrp(data, fresh_status=False)
             self.assertEqual(
                 [request["payload"]["utc"] for request in http.requests],
-                [200, 100, 200],
+                [100, 200, 200],
             )
             self.assertEqual(coordinator._india_abrp_watermarks, {"ordinary": 200, "gps": 200})
 
@@ -143,6 +143,43 @@ class AbrpDispatchTests(unittest.IsolatedAsyncioTestCase):
             await coordinator._maybe_send_abrp(data, fresh_status=False)
             self.assertEqual(len(http.requests), 5)
             self.assertEqual(http.requests[-1]["payload"], {"utc": 300, "soc": 48.0})
+
+    async def test_india_position_keeps_its_clock_without_matching_soc(self):
+        for offset in (-1, 2, 5):
+            with self.subTest(offset=offset):
+                coordinator = _coordinator(india=True)
+                data = _india_data()
+                gps = data["status"].gpsPosition
+                gps.measurement_time = 200 + offset
+                http = _Http()
+                with patch.object(COORDINATOR, "async_get_clientsession", return_value=http):
+                    await coordinator._maybe_send_abrp(data, fresh_status=False)
+                    positions = [r["payload"] for r in http.requests if "lat" in r["payload"]]
+                    self.assertEqual(len(positions), 1)
+                    self.assertEqual(positions[0]["utc"], 200 + offset)
+                    self.assertNotIn("soc", positions[0])
+                    self.assertEqual(positions[0]["lat"], 12.0)
+                    self.assertEqual(positions[0]["lon"], 77.0)
+
+                    # Replays stay suppressed, but a fresh GPS-only reading
+                    # can advance without a newer battery/status reading.
+                    await coordinator._maybe_send_abrp(data, fresh_status=False)
+                    self.assertEqual(len(http.requests), 3)
+                    gps.measurement_time += 1
+                    await coordinator._maybe_send_abrp(data, fresh_status=False)
+                    self.assertEqual(len(http.requests), 4)
+                    self.assertEqual(http.requests[-1]["payload"]["utc"], 201 + offset)
+                    self.assertEqual(coordinator._india_abrp_watermarks["gps"], 201 + offset)
+
+    async def test_india_groups_are_sent_in_time_order_within_each_poll(self):
+        coordinator = _coordinator(india=True)
+        data = _india_data()
+        data["status"].gpsPosition.measurement_time = 150
+        http = _Http()
+        with patch.object(COORDINATOR, "async_get_clientsession", return_value=http):
+            await coordinator._maybe_send_abrp(data, fresh_status=False)
+        self.assertEqual([r["payload"]["utc"] for r in http.requests], [100, 150, 200])
+        self.assertEqual(coordinator._india_abrp_watermarks, {"charge": 100, "gps": 150, "ordinary": 200})
 
     async def test_india_watermarks_belong_to_each_vehicle(self):
         first = _coordinator(india=True, vin="SYNTHETIC-A")

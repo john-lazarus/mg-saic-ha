@@ -87,6 +87,7 @@ from .const import (
     MILEAGE_UINT16_SATURATION,
     AFTER_ACTION_UPDATE_INTERVAL_DELAY,
     CHARGING_STATUS_CODES,
+    INDIA_CHARGING_FLAG_MAX_AGE,
     CHARGING_CURRENT_FACTOR,
     CHARGING_VOLTAGE_FACTOR,
     CHARGE_PAUSED_STATUS_CODES,
@@ -2604,6 +2605,16 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                     status_data = None
                 else:
                     charging_data = None
+            if charging_data is None and self.is_charging:
+                last_charge = getattr(self, "_india_state_charge_time", None)
+                if (
+                    last_charge is None
+                    or datetime.now(timezone.utc).timestamp() - last_charge
+                    > INDIA_CHARGING_FLAG_MAX_AGE.total_seconds()
+                ):
+                    # Expiry releases the operational flag; without a charge
+                    # measurement it must not invent a stop/activity timestamp.
+                    self.is_charging = self._prev_is_charging = False
             if not advanced:
                 return
             state_now = datetime.fromtimestamp(max(advanced), timezone.utc)

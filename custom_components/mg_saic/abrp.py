@@ -208,7 +208,7 @@ class AbrpApi:
         sent = False
         failure = None
         message = "no advancing usable telemetry this cycle"
-        for source, tlm in groups.items():
+        for source, tlm in sorted(groups.items(), key=lambda item: item[1]["utc"]):
             stamp = tlm["utc"]
             if stamp <= watermarks.get(source, float("-inf")):
                 continue
@@ -257,15 +257,17 @@ class AbrpApi:
                 group["is_charging"] = charging == 3
         if "gps" in groups:
             groups["gps"].update(self._gps(gps))
-            # A GPS packet needs SOC at that same source time; never relabel
-            # an older battery reading with the position's timestamp.
+            # Attach SOC only when a battery reading shares the position's
+            # source time; never relabel an older reading with it.
             for name in ("ordinary", "charge"):
                 source = groups.get(name, {})
                 if source.get("utc") == groups["gps"]["utc"] and "soc" in source:
                     groups["gps"]["soc"] = source["soc"]
                     break
+        # A valid position can stand alone when its clock differs from the
+        # battery clocks, as it already does in the global sender.
         return {name: group for name, group in groups.items()
-                if "soc" in group and (name != "gps" or "lat" in group)}
+                if ("lat" in group if name == "gps" else "soc" in group)}
 
     @staticmethod
     def _timestamp(vehicle_status: Any) -> int:

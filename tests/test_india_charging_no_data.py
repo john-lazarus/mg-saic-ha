@@ -114,3 +114,86 @@ class IndiaChargingNoDataTests(unittest.TestCase):
         self.assertIn("not available (No advancing India charge measurement time)", transitions[0])
         self.assertIn("back after", transitions[1])
         self.assertFalse(any(r.levelno >= 30 for r in logs.records))
+
+
+class IndiaChargingFlagExpiryTests(unittest.TestCase):
+    """Missing or replayed charge frames cannot hold the active flag forever."""
+
+    T0 = freshness.T0.timestamp()
+
+    def _coordinator(self):
+        c = COORD_MOD.SAICMGDataUpdateCoordinator.__new__(
+            COORD_MOD.SAICMGDataUpdateCoordinator
+        )
+        c.client = NS(_india_backend=True)
+        c.vin = "SYNTHETIC-VIN"
+        c.trip_stats = None
+        c.is_charging = c._prev_is_charging = False
+        c.is_powered_on = c._prev_is_powered_on = False
+        c.last_vehicle_activity = None
+        for name in (
+            "_save_vehicle_data", "_update_ventilation_from_status",
+            "_note_charging_flag", "_update_charge_state",
+            "_save_activity_times_if_changed", "_mark_reachable",
+            "async_update_listeners",
+        ):
+            setattr(c, name, MagicMock())
+        c._detect_activity = MagicMock(return_value=False)
+        return c
+
+    @staticmethod
+    def _status(stamp):
+        return NS(india=True, basicVehicleStatus=NS(
+            india=True, measurement_time=stamp, powerMode=None,
+        ))
+
+    def _charging(self, stamp=None, code=3):
+        stamp = self.T0 if stamp is None else stamp
+        return NS(
+            india=True,
+            chrgMgmtData=NS(india=True, measurement_time=stamp, bmsChrgSts=code),
+            rvsChargeStatus=NS(india=True, measurement_time=stamp),
+        )
+
+    def test_flag_expires_without_fabricating_charge_stop_activity(self):
+        for status_advances in (True, False):
+            for replay in (False, True):
+                with self.subTest(status_advances=status_advances, replay=replay):
+                    c = self._coordinator()
+                    with patch.object(COORD_MOD, "datetime", wraps=datetime) as clock:
+                        clock.now.return_value = freshness.T0
+                        c._update_state({"status": self._status(self.T0), "charging": self._charging()})
+                        self.assertTrue(c.is_charging)
+                        for seconds, expected in ((600, True), (1800, True), (1801, False)):
+                            later = freshness.T0 + timedelta(seconds=seconds)
+                            clock.now.return_value = later
+                            stamp = later.timestamp() if status_advances else self.T0
+                            c._update_state({
+                                "status": self._status(stamp),
+                                "charging": self._charging() if replay else None,
+                            })
+                            self.assertIs(c.is_charging, expected, f"after {seconds} s")
+                            self.assertIs(c._prev_is_charging, expected)
+                            self.assertEqual(c._india_state_charge_time, self.T0)
+                            self.assertIsNone(c.last_vehicle_activity)
+                            c._mark_reachable.assert_not_called()
+
+    def test_fresh_charge_frame_recovers_after_expiry_and_real_stop_keeps_its_time(self):
+        c = self._coordinator()
+        with patch.object(COORD_MOD, "datetime", wraps=datetime) as clock:
+            clock.now.return_value = freshness.T0
+            c._update_state({"status": self._status(self.T0), "charging": self._charging()})
+            later = freshness.T0 + timedelta(minutes=31)
+            clock.now.return_value = later
+            c._update_state({"status": self._status(self.T0), "charging": None})
+            self.assertFalse(c.is_charging)
+            c._update_state({"status": self._status(self.T0), "charging": self._charging(later.timestamp())})
+            self.assertTrue(c.is_charging)
+            self.assertTrue(c._prev_is_charging)
+            self.assertIsNone(c.last_vehicle_activity)
+
+            stopped = later + timedelta(minutes=5)
+            clock.now.return_value = stopped + timedelta(seconds=20)
+            c._update_state({"status": self._status(self.T0), "charging": self._charging(stopped.timestamp(), code=0)})
+            self.assertFalse(c.is_charging)
+            self.assertEqual(c.last_vehicle_activity, stopped)

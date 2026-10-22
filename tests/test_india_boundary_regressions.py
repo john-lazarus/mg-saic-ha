@@ -242,6 +242,7 @@ class TelemetryBoundaryTests(unittest.TestCase):
         c.trip_stats = TRIP.TripStatsManager(None, 'entry', 'VIN', india=True)
         c.vin = 'VIN'
         c._india_state_status_time, c._india_state_charge_time = status_stamp, charge_stamp
+        c.is_charging = c._prev_is_charging = False
         c.last_charging_data = object()
         retained = c.last_charging_data
         c._update_state({'status':NS(basicVehicleStatus=basic), 'charging':charging})
@@ -364,7 +365,7 @@ class TelemetryBoundaryTests(unittest.TestCase):
         self.assertEqual(api._india_payloads(None, NS(
             india=True, chrgMgmtData=NS(measurement_time=100, decoded_power=2))), {})
         async def scenario():
-            api._send_payload = AsyncMock(side_effect=[(True,'ok'), (False,'offline')])  # ABRP HTTP boundary
+            api._send_payload = AsyncMock(side_effect=[(False,'offline'), (True,'ok')])  # ABRP HTTP boundary
             marks = {}
             self.assertEqual(await api.async_send_india(status, charge, marks), (False,'offline'))
             self.assertEqual(marks, {'ordinary':200})
@@ -376,8 +377,8 @@ class TelemetryBoundaryTests(unittest.TestCase):
             await api.async_send_india(status, charge, marks)
             api._send_payload.assert_not_awaited()
             status.gpsPosition.gps_status_decoded = 2
-            api._send_payload = AsyncMock(side_effect=[ABRP.AbrpConnectionError('offline'),
-                                                       (True, 'ok'), (True, 'ok')])
+            api._send_payload = AsyncMock(side_effect=[(True, 'ok'),
+                                                       ABRP.AbrpConnectionError('offline'), (True, 'ok')])
             marks = {}
             self.assertEqual(await api.async_send_india(status, charge, marks), (False, 'offline'))
             self.assertEqual(api._send_payload.await_count, 3)

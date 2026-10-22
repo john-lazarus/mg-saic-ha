@@ -250,3 +250,62 @@ No vehicle installation, live charge, trip, Home Assistant restart, or ABRP
 service validation was performed. Publishing an experimental beta to gather
 that evidence remains a proposal for the maintainer; this reconciliation does
 not waive the outstanding field-validation requirement or merge #439.
+
+## Captured-frame review follow-up — 22 October 2026
+
+[Dr-Blank's review of `ecc7646`](https://github.com/townsmcp/mg-saic-ha/pull/439#pullrequestreview-5608834463)
+reports comparison with 157 charging frames and 138 ordinary-status frames
+from DC and AC charging sessions. That review supports the duration units,
+SOC scaling, source selection and current sign, and identifies three bugs
+that the earlier synthetic fixtures missed. These are the reviewer's reported
+capture results; this follow-up did not independently collect those frames or
+install the integration on a vehicle.
+
+### Changes
+
+- Valid India GPS groups now retain their own timestamp even when neither
+  battery source has SOC at exactly that time. SOC is attached to GPS only
+  when its source clock matches; older SOC is never relabelled. Position-only
+  packets also follow the existing global sender's contract.
+- Each poll sends its India groups in ascending timestamp order. Successful
+  groups still retain separate watermarks and only failed groups are retried.
+  This is ordering within a poll, not a guarantee of a globally monotonic
+  stream across retries: an older failed source may be retried in a later poll.
+- When no advancing India charging frame is available, the operational
+  charging flag is held across short gaps. On the next processed update more
+  than 30 minutes after the last accepted source timestamp, both flags clear,
+  including when ordinary status also stops advancing. Replayed frames do
+  not extend the hold. Expiry itself does not create a charge-end reading or
+  activity timestamp, change the source watermark, or close a stored session.
+  A fresh charging frame can re-enable the flag normally.
+
+The named `INDIA_CHARGING_FLAG_MAX_AGE` is a proposed 30-minute hold policy
+for maintainer review, not a duration established by the captures. This guard
+addresses missing/non-advancing frames; it does not change how newly advancing
+historical frames are admitted by the existing timestamp sanity checks.
+
+### Validation
+
+Four added test methods first failed against the production code at `ecc7646`
+(nine failed assertions across their subcases), reproducing missing GPS,
+out-of-order sends, and the indefinitely held flag. With the fixes:
+
+- **1,318 offline tests pass, with no skips.** Python 3.12.14;
+  `mg-saic-client==0.9.6`, `mg-ismart-india-client==0.2.1`,
+  `aiohttp==3.14.5`, `pycryptodome==3.24.1`, and `pyflakes==4.0.3`.
+- GPS regression coverage includes source-clock offsets of -1, +2 and +5
+  seconds, no invented SOC, replay suppression and GPS-only advancement.
+- Charging-flag checks cover missing/replayed frames with advancing/static
+  status, holding at exactly 30 minutes, expiry immediately beyond it, recovery,
+  and a real subsequent charge-stop retaining its measurement timestamp.
+- Existing retry tests move their simulated failures with the new send order,
+  preserving their independent-source retry assertions. One manually created
+  coordinator fixture now initializes its normal charging flags.
+- All four global differential scenarios match the beta20 plus #449/#450
+  baseline described above. The undefined-name gate and `git diff --check`
+  pass; pre-existing unused-import/variable warnings remain.
+
+These remain offline checks with substituted Home Assistant and transport
+boundaries. Live ABRP acceptance, vehicle charging/trips and a Home Assistant
+restart on the updated integration still need validation. An experimental beta
+remains a proposal for James to decide after reviewing the follow-up.
